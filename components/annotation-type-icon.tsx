@@ -2,7 +2,7 @@ import {
   RiLightbulbLine, RiMarkPenLine, RiQuestionAnswerLine,
   RiTranslate2, RiVideoLine, RiVolumeUpLine,
 } from "@remixicon/react"
-import type { AnnotationKind } from "@/lib/mock-annotations"
+import type { AnnotationKind } from "@/lib/reader-types"
 
 const icons = {
   quiz: RiQuestionAnswerLine,

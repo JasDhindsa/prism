@@ -1,24 +1,5 @@
-export type AnnotationKind = "quiz" | "adaptation" | "translation" | "pronunciation" | "highlight" | "video"
-export type AnnotationRect = { x: number; y: number; width: number; height: number }
-export type QuizQuestion =
-  | { id: string; type: "multiple-choice"; prompt: string; options: { id: string; label: string }[]; answer: string; explanation: string }
-  | { id: string; type: "fill-blank"; prompt: string; answer: string; explanation: string }
-export type ReaderQuiz = { questions: QuizQuestion[] }
-export type ReaderVideo = { scenes: { heading: string; caption: string; from: string; to: string }[]; secondsPerScene: number }
-export type ReaderAnnotation = {
-  id: string
-  kind: AnnotationKind
-  title: string
-  text: string
-  createdAt: number
-  page: number
-  quote?: string
-  rects?: AnnotationRect[]
-  quiz?: ReaderQuiz
-  video?: ReaderVideo
-  demo?: boolean
-}
-export type ReaderAction = "ask" | "explain" | "quiz" | "translate" | "pronunciation" | "video"
+import type { AnnotationKind, ReaderAction, ReaderAnnotation, ReaderQuiz, ReaderVideo } from "./reader-types"
+export type { AnnotationKind, AnnotationRect, QuizQuestion, ReaderQuiz, ReaderVideo, ReaderAnnotation, ReaderAction } from "./reader-types"
 
 const columbian = {
   explain: "The Columbian Exchange moved plants, animals, people, and diseases between the Americas and the rest of the world after 1492. Crops such as maize and potatoes spread east. Horses, cattle, and wheat spread west. These movements changed diets, trade, landscapes, and populations.",

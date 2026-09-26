@@ -39,3 +39,12 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Local AI assets and Python renderer
+/.data/
+/.venv-manim*/
+/dist/
+__pycache__/
+
+# Generated OCR runtime copied from installed dependencies
+/public/ocr/

@@ -11,8 +11,10 @@ import { Card, CardContent, CardFooter, CardHeader } from "@/components/ui/card"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
+import { ManimVideo } from "@/components/manim-video"
+import { MarkdownMessage } from "@/components/markdown-message"
 import { Slider } from "@/components/ui/slider"
-import type { ReaderAnnotation, ReaderQuiz, ReaderVideo } from "@/lib/mock-annotations"
+import type { ReaderAnnotation, ReaderQuiz, ReaderVideo } from "@/lib/reader-types"
 
 type QuizProgress = { index: number; responses: Record<string, string> }
 const emptyProgress: QuizProgress = { index: 0, responses: {} }
@@ -61,6 +63,11 @@ function QuizExperience({ quiz, progress, onProgress }: { quiz: ReaderQuiz; prog
 }
 
 function VideoExperience({ video }: { video: ReaderVideo }) {
+  if (video.jobId) return <ManimVideo jobId={video.jobId} />
+  return <DemoVideoExperience video={video} />
+}
+
+function DemoVideoExperience({ video }: { video: ReaderVideo }) {
   const [playing, setPlaying] = useState(false)
   const [seconds, setSeconds] = useState(0)
   const [mini, setMini] = useState(false)
@@ -91,7 +98,7 @@ function VideoExperience({ video }: { video: ReaderVideo }) {
   </div>
 }
 
-export function AnnotationCard({ annotation, progressKey, onClose, onDelete }: { annotation: ReaderAnnotation; progressKey: string; onClose: () => void; onDelete: () => void }) {
+export function AnnotationCard({ annotation, progressKey, onClose, onDelete, onSpeak }: { annotation: ReaderAnnotation; progressKey: string; onClose: () => void; onDelete: () => void; onSpeak: () => void }) {
   const [quizOpen, setQuizOpen] = useState(false)
   const [progress, setProgress] = useState<QuizProgress>(() => {
     if (typeof window === "undefined") return emptyProgress
@@ -102,7 +109,7 @@ export function AnnotationCard({ annotation, progressKey, onClose, onDelete }: {
     return emptyProgress
   })
   const displayTitle = /^(Quiz|Explanation|Translation|Pronunciation|Video) · Page \d+$/i.test(annotation.title)
-    ? { quiz: "Check your understanding", adaptation: "In simpler terms", translation: "Translated passage", pronunciation: "How to say it", highlight: "Saved highlight", video: "See it in motion" }[annotation.kind]
+    ? { quiz: "Check your understanding", adaptation: "Adapted passage", translation: "Translated passage", pronunciation: "How to say it", highlight: "Saved highlight", video: "See it in motion" }[annotation.kind]
     : annotation.title
   function updateProgress(next: QuizProgress) {
     setProgress(next)
@@ -112,8 +119,8 @@ export function AnnotationCard({ annotation, progressKey, onClose, onDelete }: {
   const score = annotation.quiz?.questions.filter((question) => progress.responses[question.id]?.trim().toLocaleLowerCase() === question.answer.toLocaleLowerCase()).length ?? 0
   return <motion.div layout="position" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, x: 18 }} transition={{ duration: 0.2 }}>
     <Card size="sm" className="reader-annotation-card gap-0 py-0 ring-0">
-      <CardHeader className="reader-annotation-card-head"><h3 className="min-w-0 text-sm font-semibold leading-5">{displayTitle}</h3><Button size="icon-sm" variant="ghost" aria-label={`Close ${annotation.title}`} onClick={onClose}><RiCloseLine className="size-4" /></Button></CardHeader>
-      <CardContent className="reader-annotation-card-body">{annotation.kind === "quiz" && annotation.quiz ? <div><p className="text-sm leading-6 text-muted-foreground">{progress.index >= annotation.quiz.questions.length ? `Last attempt: ${score} of ${annotation.quiz.questions.length} correct.` : progress.index > 0 ? `Question ${progress.index + 1} of ${annotation.quiz.questions.length} is next.` : `${annotation.quiz.questions.length} quick questions about this page.`}</p><Button size="sm" className="mt-4 w-full" onClick={() => setQuizOpen(true)}>{progress.index >= annotation.quiz.questions.length ? "View results" : progress.index > 0 ? "Resume quiz" : "Start quiz"} <RiArrowRightLine className="size-4" /></Button></div> : annotation.kind === "video" && annotation.video ? <VideoExperience video={annotation.video} /> : <p className="whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{annotation.text}</p>}</CardContent>
+      <CardHeader className="reader-annotation-card-head"><h3 className="min-w-0 text-sm font-semibold leading-5">{displayTitle}{annotation.demo && <span className="ml-2 text-[10px] font-normal text-muted-foreground">Demo</span>}</h3><Button size="icon-sm" variant="ghost" aria-label={`Close ${annotation.title}`} onClick={onClose}><RiCloseLine className="size-4" /></Button></CardHeader>
+      <CardContent className="reader-annotation-card-body">{annotation.kind === "quiz" && annotation.quiz ? <div><p className="text-sm leading-6 text-muted-foreground">{progress.index >= annotation.quiz.questions.length ? `Last attempt: ${score} of ${annotation.quiz.questions.length} correct.` : progress.index > 0 ? `Question ${progress.index + 1} of ${annotation.quiz.questions.length} is next.` : `${annotation.quiz.questions.length} quick questions about this page.`}</p><Button size="sm" className="mt-4 w-full" onClick={() => setQuizOpen(true)}>{progress.index >= annotation.quiz.questions.length ? "View results" : progress.index > 0 ? "Resume quiz" : "Start quiz"} <RiArrowRightLine className="size-4" /></Button></div> : annotation.kind === "video" && annotation.video ? <VideoExperience video={annotation.video} /> : <div><MarkdownMessage text={annotation.text} />{!annotation.demo && annotation.kind !== "highlight" && <Button variant="ghost" size="sm" className="mt-3" onClick={onSpeak}><RiPlayLine className="size-4" />{annotation.kind === "pronunciation" ? "Hear pronunciation" : annotation.kind === "translation" ? "Listen to translation" : "Read aloud"}</Button>}</div>}{annotation.quote && !annotation.demo && <details className="reader-source-details"><summary>Reviewed source</summary><p dir="auto">{annotation.quote}</p></details>}</CardContent>
       <CardFooter className="reader-annotation-card-foot"><Button type="button" variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive" aria-label={`Delete ${annotation.title}`} onClick={onDelete}><RiDeleteBin6Line className="size-4" /> Delete annotation</Button></CardFooter>
     </Card>
     {annotation.quiz && <Dialog open={quizOpen} onOpenChange={setQuizOpen}><DialogContent className="reader-quiz-dialog"><DialogHeader><DialogTitle>{displayTitle}</DialogTitle></DialogHeader><QuizExperience key={quizOpen ? "open" : "closed"} quiz={annotation.quiz} progress={progress} onProgress={updateProgress} /></DialogContent></Dialog>}

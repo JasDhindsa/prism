@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { getLibraryPdf, type LibraryPdf } from "@/lib/library"
-import { getDemoAnnotations, type AnnotationKind, type ReaderAnnotation } from "@/lib/mock-annotations"
+import type { AnnotationKind, ReaderAnnotation } from "@/lib/reader-types"
 
 const categories: { value: AnnotationKind; label: string }[] = [
   { value: "quiz", label: "Quiz" },
@@ -90,7 +90,7 @@ export default function BookPage() {
     } catch { setError("This annotation could not be deleted.") }
   }
 
-  const annotations = [...savedAnnotations, ...getDemoAnnotations(book?.title ?? "").filter((annotation) => !hiddenDemoIds.includes(annotation.id))]
+  const annotations = savedAnnotations
   const visibleAnnotations = annotations.filter((item) => filter === "all" || item.kind === filter)
 
   return <main className="min-h-screen bg-background text-foreground">
