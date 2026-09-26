@@ -7,7 +7,9 @@ import type { PDFDocumentLoadingTask, PDFDocumentProxy, PDFPageProxy } from "pdf
 import {
   RiArrowLeftLine, RiArrowUpLine, RiCloseLine, RiCropLine,
   RiLayoutLeftLine, RiMicLine, RiResetLeftLine, RiSearchLine, RiSparklingLine, RiMessage2Line,
+  RiCursorLine, RiEraserLine, RiMarkPenLine, RiPencilLine, RiStickyNoteLine, RiArrowGoBackLine,
 } from "@remixicon/react"
+import { MarkupLayer, type MarkupTool, type PageMarkup } from "./markup-layer"
 import { AnnotationCard } from "./annotation-card"
 import { AnnotationTypeIcon } from "@/components/annotation-type-icon"
 import { Button } from "@/components/ui/button"
@@ -50,6 +52,7 @@ type SpeechPlayer = ReturnType<typeof useSelectionSpeech>
 
 const annotationColors = ["#f59e0b", "#10b981", "#8b5cf6", "#ec4899", "#0ea5e9", "#f97316", "#14b8a6", "#6366f1", "#f43f5e", "#84cc16"] as const
 const annotationColor = (index?: number) => annotationColors[index ?? 0] ?? annotationColors[0]
+const markupColors = ["#facc15", "#fb7185", "#60a5fa", "#4ade80", "#a78bfa"] as const
 
 function restoreAnnotationColors(annotations: ReaderAnnotation[]): ReaderAnnotation[] {
   const ordered = [...annotations].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || a.id.localeCompare(b.id))
@@ -134,7 +137,7 @@ function layoutAnnotationPins(annotations: ReaderAnnotation[], width: number, he
   })
 }
 
-function PdfPage({ pdf, number, zoom, areaEnabled, selection, annotations, openAnnotationId, audioAnnotationId, speechPlayer, onSelect, onClearSelection, onSelectionAction, onOpenAnnotation, onCloseAnnotation, onDeleteAnnotation, onSpeakAnnotation, onError }: { pdf: PDFDocumentProxy; number: number; zoom: number; areaEnabled: boolean; selection: Selection | null; annotations: ReaderAnnotation[]; openAnnotationId: string | null; audioAnnotationId: string | null; speechPlayer: SpeechPlayer; onSelect: (selection: Selection) => void; onClearSelection: () => void; onSelectionAction: (action: Exclude<ReaderAction, "ask">) => void; onOpenAnnotation: (annotation: ReaderAnnotation) => void; onCloseAnnotation: (id: string) => void; onDeleteAnnotation: (annotation: ReaderAnnotation) => void; onSpeakAnnotation: (annotation: ReaderAnnotation) => void; onError: (message: string) => void }) {
+function PdfPage({ pdf, number, zoom, areaEnabled, selection, annotations, markups, markupTool, markupColor, openMarkupNoteId, onAddMarkup, onUpdateMarkup, onDeleteMarkup, onOpenMarkupNote, openAnnotationId, audioAnnotationId, speechPlayer, onSelect, onClearSelection, onSelectionAction, onOpenAnnotation, onCloseAnnotation, onDeleteAnnotation, onSpeakAnnotation, onError }: { pdf: PDFDocumentProxy; number: number; zoom: number; areaEnabled: boolean; selection: Selection | null; annotations: ReaderAnnotation[]; markups: PageMarkup[]; markupTool: MarkupTool; markupColor: string; openMarkupNoteId: string | null; onAddMarkup: (mark: PageMarkup) => void; onUpdateMarkup: (mark: PageMarkup) => void; onDeleteMarkup: (id: string) => void; onOpenMarkupNote: (id: string | null) => void; openAnnotationId: string | null; audioAnnotationId: string | null; speechPlayer: SpeechPlayer; onSelect: (selection: Selection) => void; onClearSelection: () => void; onSelectionAction: (action: Exclude<ReaderAction, "ask">) => void; onOpenAnnotation: (annotation: ReaderAnnotation) => void; onCloseAnnotation: (id: string) => void; onDeleteAnnotation: (annotation: ReaderAnnotation) => void; onSpeakAnnotation: (annotation: ReaderAnnotation) => void; onError: (message: string) => void }) {
   const wrap = useRef<HTMLDivElement>(null)
   const canvas = useRef<HTMLCanvasElement>(null)
   const [width, setWidth] = useState(800)
@@ -207,6 +210,7 @@ function PdfPage({ pdf, number, zoom, areaEnabled, selection, annotations, openA
   return <div ref={wrap} className="reader-page-wrap">
     <div className="reader-page" style={{ width: dimensions.width, height: dimensions.height }}>
       <canvas ref={canvas} className="reader-page-canvas" />
+      {!areaEnabled && <MarkupLayer page={number} width={dimensions.width} height={dimensions.height} tool={markupTool} color={markupColor} marks={markups} openNoteId={openMarkupNoteId} onAdd={onAddMarkup} onUpdate={onUpdateMarkup} onDelete={onDeleteMarkup} onOpenNote={onOpenMarkupNote} />}
       {areaEnabled && <div className="reader-area-layer" aria-label="Drag to select an area" onPointerDown={(event) => { dragStart.current = point(event); event.currentTarget.setPointerCapture(event.pointerId) }} onPointerMove={(event) => { if (!dragStart.current) return; const end = point(event), start = dragStart.current; setDrag({ x: Math.min(start.x, end.x), y: Math.min(start.y, end.y), width: Math.abs(start.x - end.x), height: Math.abs(start.y - end.y) }) }} onPointerUp={finishArea} onPointerCancel={() => { dragStart.current = null; setDrag(null) }}>
         {drag && <span className="reader-area-rect" style={{ left: `${drag.x * 100}%`, top: `${drag.y * 100}%`, width: `${drag.width * 100}%`, height: `${drag.height * 100}%` }} />}
       </div>}
@@ -232,7 +236,7 @@ function PdfPage({ pdf, number, zoom, areaEnabled, selection, annotations, openA
   </div>
 }
 
-function LazyPdfPage({ pdf, number, zoom, areaEnabled, selection, annotations, openAnnotationId, audioAnnotationId, speechPlayer, scrollRoot, onSelect, onClearSelection, onSelectionAction, onOpenAnnotation, onCloseAnnotation, onDeleteAnnotation, onSpeakAnnotation, onError }: { pdf: PDFDocumentProxy; number: number; zoom: number; areaEnabled: boolean; selection: Selection | null; annotations: ReaderAnnotation[]; openAnnotationId: string | null; audioAnnotationId: string | null; speechPlayer: SpeechPlayer; scrollRoot: React.RefObject<HTMLDivElement | null>; onSelect: (selection: Selection) => void; onClearSelection: () => void; onSelectionAction: (action: Exclude<ReaderAction, "ask">) => void; onOpenAnnotation: (annotation: ReaderAnnotation) => void; onCloseAnnotation: (id: string) => void; onDeleteAnnotation: (annotation: ReaderAnnotation) => void; onSpeakAnnotation: (annotation: ReaderAnnotation) => void; onError: (message: string) => void }) {
+function LazyPdfPage({ pdf, number, zoom, areaEnabled, selection, annotations, markups, markupTool, markupColor, openMarkupNoteId, onAddMarkup, onUpdateMarkup, onDeleteMarkup, onOpenMarkupNote, openAnnotationId, audioAnnotationId, speechPlayer, scrollRoot, onSelect, onClearSelection, onSelectionAction, onOpenAnnotation, onCloseAnnotation, onDeleteAnnotation, onSpeakAnnotation, onError }: { pdf: PDFDocumentProxy; number: number; zoom: number; areaEnabled: boolean; selection: Selection | null; annotations: ReaderAnnotation[]; markups: PageMarkup[]; markupTool: MarkupTool; markupColor: string; openMarkupNoteId: string | null; onAddMarkup: (mark: PageMarkup) => void; onUpdateMarkup: (mark: PageMarkup) => void; onDeleteMarkup: (id: string) => void; onOpenMarkupNote: (id: string | null) => void; openAnnotationId: string | null; audioAnnotationId: string | null; speechPlayer: SpeechPlayer; scrollRoot: React.RefObject<HTMLDivElement | null>; onSelect: (selection: Selection) => void; onClearSelection: () => void; onSelectionAction: (action: Exclude<ReaderAction, "ask">) => void; onOpenAnnotation: (annotation: ReaderAnnotation) => void; onCloseAnnotation: (id: string) => void; onDeleteAnnotation: (annotation: ReaderAnnotation) => void; onSpeakAnnotation: (annotation: ReaderAnnotation) => void; onError: (message: string) => void }) {
   const section = useRef<HTMLElement>(null)
   const [visible, setVisible] = useState(number <= 2)
   const [height, setHeight] = useState<number | null>(null)
@@ -256,7 +260,7 @@ function LazyPdfPage({ pdf, number, zoom, areaEnabled, selection, annotations, o
   }, [visible])
 
   return <section ref={section} id={`reader-page-${number}`} data-page-number={number} className="reader-page-section" style={!visible && height ? { minHeight: height } : undefined} aria-label={`Page ${number}`}>
-    {visible || annotations.some((annotation) => annotation.page === number && annotation.id === openAnnotationId) ? <PdfPage pdf={pdf} number={number} zoom={zoom} areaEnabled={areaEnabled} selection={selection} annotations={annotations} openAnnotationId={openAnnotationId} audioAnnotationId={audioAnnotationId} speechPlayer={speechPlayer} onSelect={onSelect} onClearSelection={onClearSelection} onSelectionAction={onSelectionAction} onOpenAnnotation={onOpenAnnotation} onCloseAnnotation={onCloseAnnotation} onDeleteAnnotation={onDeleteAnnotation} onSpeakAnnotation={onSpeakAnnotation} onError={onError} /> : <div className="reader-page-placeholder" style={height ? { minHeight: Math.max(300, height - 28) } : undefined} aria-hidden="true" />}
+    {visible || annotations.some((annotation) => annotation.page === number && annotation.id === openAnnotationId) || markups.some((mark) => mark.id === openMarkupNoteId) ? <PdfPage pdf={pdf} number={number} zoom={zoom} areaEnabled={areaEnabled} selection={selection} annotations={annotations} markups={markups} markupTool={markupTool} markupColor={markupColor} openMarkupNoteId={openMarkupNoteId} onAddMarkup={onAddMarkup} onUpdateMarkup={onUpdateMarkup} onDeleteMarkup={onDeleteMarkup} onOpenMarkupNote={onOpenMarkupNote} openAnnotationId={openAnnotationId} audioAnnotationId={audioAnnotationId} speechPlayer={speechPlayer} onSelect={onSelect} onClearSelection={onClearSelection} onSelectionAction={onSelectionAction} onOpenAnnotation={onOpenAnnotation} onCloseAnnotation={onCloseAnnotation} onDeleteAnnotation={onDeleteAnnotation} onSpeakAnnotation={onSpeakAnnotation} onError={onError} /> : <div className="reader-page-placeholder" style={height ? { minHeight: Math.max(300, height - 28) } : undefined} aria-hidden="true" />}
     <span className="reader-page-caption">{number}</span>
   </section>
 }
@@ -276,6 +280,10 @@ export default function ReaderPage() {
   const [areaEnabled, setAreaEnabled] = useState(false)
   const [selection, setSelection] = useState<Selection | null>(null)
   const [savedAnnotations, setSavedAnnotations] = useState<ReaderAnnotation[]>([])
+  const [markups, setMarkups] = useState<PageMarkup[]>([])
+  const [markupTool, setMarkupTool] = useState<MarkupTool>("cursor")
+  const [markupColor, setMarkupColor] = useState<string>(markupColors[0])
+  const [openMarkupNoteId, setOpenMarkupNoteId] = useState<string | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
   const [search, setSearch] = useState("")
   const [searching, setSearching] = useState(false)
@@ -373,6 +381,10 @@ export default function ReaderPage() {
         queueMicrotask(() => { if (active) setSavedAnnotations(restored) })
       }
     } catch { /* Invalid saved notes should not block reading. */ }
+    try {
+      const saved: unknown = JSON.parse(localStorage.getItem(`prism-markups:${id}`) ?? "[]")
+      if (Array.isArray(saved)) queueMicrotask(() => { if (active) setMarkups(saved.filter((mark): mark is PageMarkup => !!mark && typeof mark === "object" && typeof mark.id === "string" && Number.isInteger(mark.page) && ["highlight", "pen", "note"].includes(mark.kind))) })
+    } catch { /* Invalid markup data should not block reading. */ }
     return () => { active = false; void loadingTask?.destroy() }
   }, [id, loadBook, saveBook, reloadKey])
 
@@ -455,6 +467,16 @@ export default function ReaderPage() {
     catch { setError("This annotation could not be saved. Browser storage may be full."); return false }
   }
 
+  function persistMarkups(next: PageMarkup[]) {
+    try { localStorage.setItem(`prism-markups:${id}`, JSON.stringify(next)); setMarkups(next) }
+    catch { setError("Your PDF marks could not be saved. Browser storage may be full.") }
+  }
+
+  function addMarkup(mark: PageMarkup) { persistMarkups([...markups, mark]) }
+  function updateMarkup(mark: PageMarkup) { persistMarkups(markups.map((item) => item.id === mark.id ? mark : item)) }
+  function deleteMarkup(markId: string) { persistMarkups(markups.filter((item) => item.id !== markId)); setOpenMarkupNoteId((current) => current === markId ? null : current) }
+  function chooseMarkupTool(tool: MarkupTool) { setMarkupTool(tool); setAreaEnabled(false); setSelection(null); setOpenMarkupNoteId(null) }
+
   function openAnnotation(annotation: ReaderAnnotation) {
     voice.stop(); setVoiceOpen(false)
     if (audioAnnotationId && audioAnnotationId !== annotation.id) { selectionSpeech.close(); setAudioAnnotationId(null) }
@@ -469,6 +491,7 @@ export default function ReaderPage() {
 
   function toggleAreaSelection() {
     if (!areaEnabled && openAnnotationId) closeAnnotation(openAnnotationId)
+    if (!areaEnabled) { setMarkupTool("cursor"); setOpenMarkupNoteId(null) }
     setAreaEnabled(!areaEnabled)
   }
 
@@ -651,7 +674,7 @@ export default function ReaderPage() {
         if (target instanceof Element && target.closest('[data-slot="select-trigger"], button, a')) return
         if (event.key === "ArrowRight") goToPage(page + 1)
         if (event.key === "ArrowLeft") goToPage(page - 1)
-        if (event.key === "Escape") { voiceStop.current(); setVoiceOpen(false); setSelection(null); setAssistantOpen(false); setAreaEnabled(false); setOpenAnnotationId(null) }
+        if (event.key === "Escape") { voiceStop.current(); setVoiceOpen(false); setSelection(null); setAssistantOpen(false); setAreaEnabled(false); setMarkupTool("cursor"); setOpenMarkupNoteId(null); setOpenAnnotationId(null) }
         return
       }
       event.preventDefault()
@@ -712,6 +735,18 @@ export default function ReaderPage() {
     <Sheet open={sidebar} onOpenChange={setSidebar}><SheetContent side="left" showCloseButton className="reader-pages-sheet"><SheetHeader className="reader-pages-sheet-head"><SheetTitle>Pages</SheetTitle><span>{pdf?.numPages ?? 0}</span></SheetHeader>{pdf && <ScrollArea className="reader-thumbnails">{Array.from({ length: pdf.numPages }, (_, index) => <Thumbnail key={index + 1} pdf={pdf} number={index + 1} active={page === index + 1} onClick={() => { setSidebar(false); goToPage(index + 1) }} />)}</ScrollArea>}</SheetContent></Sheet>
 
     <div className="reader-body">
+      <TooltipProvider><aside className="reader-markup-rail" aria-label="PDF markup tools">
+        <div className="reader-markup-rail-title">MARKUP</div>
+        {([
+          ["cursor", "Cursor", RiCursorLine], ["highlight", "Highlight", RiMarkPenLine], ["pen", "Draw with pen", RiPencilLine], ["note", "Sticky note", RiStickyNoteLine], ["eraser", "Erase marks", RiEraserLine],
+        ] as const).map(([tool, label, Icon]) => <Tooltip key={tool}><TooltipTrigger render={<button type="button" className="reader-markup-tool" aria-label={label} aria-pressed={markupTool === tool} onClick={() => chooseMarkupTool(tool)}><Icon className="size-[19px]" /></button>} /><TooltipContent side="right">{label}</TooltipContent></Tooltip>)}
+        <div className="reader-markup-divider" />
+        <div className="reader-markup-colors" aria-label="Markup color">
+          {markupColors.map((color, index) => <button key={color} type="button" className="reader-markup-color" style={{ backgroundColor: color }} aria-label={`Color ${index + 1}`} aria-pressed={markupColor === color} onClick={() => setMarkupColor(color)} />)}
+        </div>
+        <div className="reader-markup-rail-spacer" />
+        <Tooltip><TooltipTrigger render={<button type="button" className="reader-markup-tool" aria-label="Undo last mark" disabled={!markups.length} onClick={() => { const latest = [...markups].sort((a, b) => b.createdAt - a.createdAt)[0]; if (latest) deleteMarkup(latest.id) }}><RiArrowGoBackLine className="size-[19px]" /></button>} /><TooltipContent side="right">Undo last mark</TooltipContent></Tooltip>
+      </aside></TooltipProvider>
       <div className="reader-workspace">
         {searchOpen && <div className="reader-search" role="search" aria-label="Search this PDF">
           <form onSubmit={searchPdf} className="reader-search-form">
@@ -725,7 +760,7 @@ export default function ReaderPage() {
         </div>}
         <div ref={stage} className="reader-stage">
           {loading ? <div className="reader-loading"><Skeleton className="h-[65vh] w-full max-w-3xl rounded-sm" /></div> : !pdf ? <div className="reader-error"><h1>Couldn’t open this PDF</h1><p>{error || "This book is no longer in your library."}</p><Button variant="secondary" onClick={() => setReloadKey((value) => value + 1)}>Try again</Button><Link href={`/books/${encodeURIComponent(id)}`}>Back to book</Link></div> : <div className="reader-pages">
-            {Array.from({ length: pdf.numPages }, (_, index) => <LazyPdfPage key={index + 1} pdf={pdf} number={index + 1} zoom={zoom} areaEnabled={areaEnabled} selection={selection} annotations={annotations} openAnnotationId={openAnnotationId} audioAnnotationId={audioAnnotationId} speechPlayer={selectionSpeech} scrollRoot={stage} onSelect={(value) => { setSelection(value); setAreaEnabled(false); setError("") }} onClearSelection={() => setSelection(null)} onSelectionAction={prepareAnnotation} onOpenAnnotation={openAnnotation} onCloseAnnotation={closeAnnotation} onDeleteAnnotation={deleteAnnotation} onSpeakAnnotation={speakAnnotation} onError={setError} />)}
+            {Array.from({ length: pdf.numPages }, (_, index) => <LazyPdfPage key={index + 1} pdf={pdf} number={index + 1} zoom={zoom} areaEnabled={areaEnabled} selection={selection} annotations={annotations} markups={markups} markupTool={markupTool} markupColor={markupColor} openMarkupNoteId={openMarkupNoteId} onAddMarkup={addMarkup} onUpdateMarkup={updateMarkup} onDeleteMarkup={deleteMarkup} onOpenMarkupNote={setOpenMarkupNoteId} openAnnotationId={openAnnotationId} audioAnnotationId={audioAnnotationId} speechPlayer={selectionSpeech} scrollRoot={stage} onSelect={(value) => { setSelection(value); setAreaEnabled(false); setError("") }} onClearSelection={() => setSelection(null)} onSelectionAction={prepareAnnotation} onOpenAnnotation={openAnnotation} onCloseAnnotation={closeAnnotation} onDeleteAnnotation={deleteAnnotation} onSpeakAnnotation={speakAnnotation} onError={setError} />)}
           </div>}
         </div>
         {areaEnabled && <p className="reader-area-hint">Drag over a page to select an area <span>· Esc to cancel</span></p>}
