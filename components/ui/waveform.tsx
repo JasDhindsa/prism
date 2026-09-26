@@ -174,6 +174,7 @@ export type ScrollingWaveformProps = Omit<
 }
 
 export const ScrollingWaveform = ({
+  active = true,
   speed = 50,
   barCount = 60,
   barWidth = 4,
@@ -192,6 +193,7 @@ export const ScrollingWaveform = ({
   const containerRef = useRef<HTMLDivElement>(null)
   const barsRef = useRef<Array<{ x: number; height: number }>>([])
   const animationRef = useRef<number>(0)
+  const redrawRef = useRef<() => void>(() => {})
   const lastTimeRef = useRef<number>(0)
   const seedRef = useRef(Math.random())
   const dataIndexRef = useRef(0)
@@ -232,6 +234,7 @@ export const ScrollingWaveform = ({
           currentX -= step
         }
       }
+      redrawRef.current()
     })
 
     resizeObserver.observe(container)
@@ -245,11 +248,11 @@ export const ScrollingWaveform = ({
     const ctx = canvas.getContext("2d")
     if (!ctx) return
 
-    const animate = (currentTime: number) => {
-      const deltaTime = lastTimeRef.current
+    const draw = (currentTime: number, advance: boolean) => {
+      const deltaTime = advance && lastTimeRef.current
         ? (currentTime - lastTimeRef.current) / 1000
         : 0
-      lastTimeRef.current = currentTime
+      if (advance) lastTimeRef.current = currentTime
 
       const rect = canvas.getBoundingClientRect()
       ctx.clearRect(0, 0, rect.width, rect.height)
@@ -341,15 +344,26 @@ export const ScrollingWaveform = ({
 
       ctx.globalAlpha = 1
 
-      animationRef.current = requestAnimationFrame(animate)
     }
 
-    animationRef.current = requestAnimationFrame(animate)
+    redrawRef.current = () => draw(0, false)
+    draw(0, false)
+    if (active) {
+      const animate = (currentTime: number) => {
+        draw(currentTime, true)
+        animationRef.current = requestAnimationFrame(animate)
+      }
+      animationRef.current = requestAnimationFrame(animate)
+    } else {
+      lastTimeRef.current = 0
+    }
 
     return () => {
+      redrawRef.current = () => {}
       if (animationRef.current) {
         cancelAnimationFrame(animationRef.current)
       }
+      lastTimeRef.current = 0
     }
   }, [
     speed,
@@ -362,6 +376,7 @@ export const ScrollingWaveform = ({
     fadeEdges,
     fadeWidth,
     data,
+    active,
   ])
 
   return (

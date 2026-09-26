@@ -67,7 +67,7 @@ function PronunciationWaveform({ onPlay, player }: { onPlay: () => void; player?
   const loading = player?.phase === "processing" || player?.phase === "preparing"
   const playing = player?.phase === "playing"
   return <button type="button" className={`reader-pronunciation-waveform${loading ? " reader-pronunciation-waveform-loading" : ""}`} onClick={onPlay} disabled={loading} aria-label={playing ? "Pause pronunciation" : "Play pronunciation"} aria-pressed={playing} aria-busy={loading} title={playing ? "Pause pronunciation" : "Play pronunciation"}>
-    <ScrollingWaveform height={34} barWidth={3} barGap={2} speed={30} fadeEdges={true} barColor="gray" aria-hidden="true" />
+    <ScrollingWaveform active={playing} height={34} barWidth={3} barGap={2} speed={30} fadeEdges={true} barColor="gray" aria-hidden="true" />
     {loading && <span className="sr-only" role="status">Preparing pronunciation audio…</span>}
   </button>
 }

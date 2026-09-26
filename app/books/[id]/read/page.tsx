@@ -383,22 +383,32 @@ export default function ReaderPage() {
     const target = savedAnnotations.find((annotation) => annotation.id === targetId)
     if (!target) return
 
+    const scrollWithinReader = (element: HTMLElement, offset: number) => {
+      const container = stage.current
+      if (!container) return
+      const top = container.scrollTop + element.getBoundingClientRect().top - container.getBoundingClientRect().top - offset
+      container.scrollTo({ top: Math.max(0, top), behavior: "auto" })
+    }
     let frame = 0
     let attempts = 0
     const scrollToAnnotation = () => {
       const pin = Array.from(stage.current?.querySelectorAll<HTMLElement>("[data-annotation-id]") ?? [])
         .find((element) => element.dataset.annotationId === targetId)
       if (pin) {
-        pin.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" })
+        scrollWithinReader(pin, (stage.current?.clientHeight ?? 0) * 0.35)
         openedDeepLink.current = targetId
       } else if (++attempts < 30) {
         frame = requestAnimationFrame(scrollToAnnotation)
       } else {
-        document.getElementById(`reader-page-${target.page}`)?.scrollIntoView({ behavior: "smooth", block: "center" })
+        const section = stage.current?.querySelector<HTMLElement>(`#reader-page-${target.page}`)
+        if (section) scrollWithinReader(section, 24)
         openedDeepLink.current = targetId
       }
     }
     frame = requestAnimationFrame(() => {
+      window.scrollTo(0, 0)
+      const section = stage.current?.querySelector<HTMLElement>(`#reader-page-${target.page}`)
+      if (section) scrollWithinReader(section, 24)
       setPage(target.page)
       setAreaEnabled(false)
       setSelection(null)
