@@ -5,11 +5,10 @@
   "type": "module",
   "engines": { "node": ">=22" },
   "scripts": {
-    "dev": "tsx watch server/index.ts",
+    "dev": "tsx watch --include .env server/index.ts",
     "build": "tsc --noEmit && vite build && tsc -p tsconfig.server.json",
     "start": "node build/server/index.js",
-    "test": "tsx --test tests/*.test.ts",
-    "sample": "tsx scripts/create-sample.ts"
+    "test": "tsx --test tests/*.test.ts"
   },
   "dependencies": {
     "dotenv": "^16.6.1",

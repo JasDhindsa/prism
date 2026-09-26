@@ -41,7 +41,7 @@ export default function App() {
     void api<Health>('/health').then(setHealth).catch(e=>onError(e.message));
     void loadDocuments().then(saved=>{
       // Remove the old starter document; the library contains only uploaded PDFs.
-      const list=saved.filter(d=>d.name!=='Concept Notes.pdf');
+      const list=saved.filter(d=>d.id!=='b52b43d322ad4ce3ba77c7ebd728060fff9635d5852c2681daedce0d973683fc');
       setDocuments(list);setCurrentId(list[0]?.id||'');setRestored(true);
     }).catch(e=>{onError(e.message);setRestored(true);});
     const id=new URLSearchParams(location.search).get('room');

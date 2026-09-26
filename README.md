@@ -10,7 +10,7 @@ An adaptive PDF annotation reader powered by Gemini and ElevenLabs. Node.js 22 o
 
 Get a Gemini key from [Google AI Studio](https://aistudio.google.com/apikey) and an ElevenLabs key from your [ElevenLabs account](https://elevenlabs.io/app/settings/api-keys). Set `ELEVENLABS_VOICE_ID` to a voice available to your account if the default voice is unavailable. The settings dialog can load account voices. The defaults are `gemini-3.8-flash` and `eleven_multilingual_v2`; models and voice are configurable without code changes.
 
-`npm run build` type-checks the app and produces the browser and server builds. `npm start` serves the production build. `npm test` runs mocked provider and HTTP integration tests without charging either API. `npm run sample` rebuilds the three-page sample PDF.
+`npm run build` produces the browser and server builds. `npm start` serves the production build. The library starts empty and contains only PDFs you import. There are no sample readings or generated placeholder annotations.
 
 ## Features
 

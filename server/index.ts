@@ -13,6 +13,6 @@ if (process.env.NODE_ENV === 'production' || process.argv[1]?.endsWith('.js')) {
   app.use(vite.middlewares);
 }
 app.listen(config.port, config.host, () => {
-  console.log(`Lumen is ready at http://${config.host}:${config.port}`);
+  console.log(`Lumen Reader is ready at http://${config.host}:${config.port}`);
   console.log(`Gemini: ${config.geminiKey ? 'configured' : 'add GEMINI_API_KEY to .env'} · ElevenLabs: ${config.elevenKey ? 'configured' : 'add ELEVENLABS_API_KEY to .env'}`);
 });
