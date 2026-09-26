@@ -3,22 +3,22 @@
 import Link from "next/link"
 import { useParams, useRouter } from "next/navigation"
 import { useEffect, useState } from "react"
-import { RiArrowLeftLine, RiBookOpenLine, RiDownloadLine, RiFileTextLine } from "@remixicon/react"
+import { RiArrowLeftLine, RiBookOpenLine, RiDeleteBin6Line, RiDownloadLine } from "@remixicon/react"
+import { AnnotationTypeIcon } from "@/components/annotation-type-icon"
 import { BookCover } from "@/components/book-cover"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { getLibraryPdf, type LibraryPdf } from "@/lib/library"
+import { getDemoAnnotations, type AnnotationKind, type ReaderAnnotation } from "@/lib/mock-annotations"
 
-type Kind = "quiz" | "adaptation" | "translation" | "pronunciation" | "highlight"
-type Annotation = { id: string; kind: Kind; title: string; text: string; createdAt: number }
-
-const categories: { value: Kind; label: string }[] = [
+const categories: { value: AnnotationKind; label: string }[] = [
   { value: "quiz", label: "Quiz" },
   { value: "adaptation", label: "Adaptation" },
   { value: "translation", label: "Translation" },
   { value: "pronunciation", label: "Pronunciation" },
   { value: "highlight", label: "Highlight" },
+  { value: "video", label: "Video" },
 ]
 
 function formatSize(size: number) {
@@ -31,8 +31,9 @@ export default function BookPage() {
   const [book, setBook] = useState<LibraryPdf | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
-  const [annotations, setAnnotations] = useState<Annotation[]>([])
-  const [filter, setFilter] = useState<Kind | "all">("all")
+  const [savedAnnotations, setSavedAnnotations] = useState<ReaderAnnotation[]>([])
+  const [hiddenDemoIds, setHiddenDemoIds] = useState<string[]>([])
+  const [filter, setFilter] = useState<AnnotationKind | "all">("all")
 
   useEffect(() => {
     let active = true
@@ -43,7 +44,9 @@ export default function BookPage() {
     function loadAnnotations() {
       try {
         const saved: unknown = JSON.parse(localStorage.getItem(`prism-annotations:${id}`) ?? "[]")
-        if (Array.isArray(saved)) setAnnotations(saved)
+        if (Array.isArray(saved)) setSavedAnnotations(saved as ReaderAnnotation[])
+        const hidden: unknown = JSON.parse(localStorage.getItem(`prism-hidden-demo-annotations:${id}`) ?? "[]")
+        if (Array.isArray(hidden)) setHiddenDemoIds(hidden as string[])
       } catch {
         setError("Your annotations could not be loaded.")
       }
@@ -73,6 +76,21 @@ export default function BookPage() {
     window.setTimeout(() => URL.revokeObjectURL(url), 60000)
   }
 
+  function deleteAnnotation(annotation: ReaderAnnotation) {
+    try {
+      if (annotation.id.startsWith("demo-columbian-")) {
+        const next = [...hiddenDemoIds, annotation.id]
+        localStorage.setItem(`prism-hidden-demo-annotations:${id}`, JSON.stringify(next))
+        setHiddenDemoIds(next)
+      } else {
+        const next = savedAnnotations.filter((item) => item.id !== annotation.id)
+        localStorage.setItem(`prism-annotations:${id}`, JSON.stringify(next))
+        setSavedAnnotations(next)
+      }
+    } catch { setError("This annotation could not be deleted.") }
+  }
+
+  const annotations = [...savedAnnotations, ...getDemoAnnotations(book?.title ?? "").filter((annotation) => !hiddenDemoIds.includes(annotation.id))]
   const visibleAnnotations = annotations.filter((item) => filter === "all" || item.kind === filter)
 
   return <main className="min-h-screen bg-background text-foreground">
@@ -127,7 +145,7 @@ export default function BookPage() {
               <h2 id="annotations-title" className="text-3xl font-medium tracking-[-.04em]">Your annotations <span className="text-muted-foreground">{annotations.length}</span></h2>
               <p className="mt-3 text-sm text-muted-foreground">Saved notes for this book.</p>
             </div>
-            <Tabs value={filter} onValueChange={(value) => setFilter(value as Kind | "all")}>
+            <Tabs value={filter} onValueChange={(value) => setFilter(value as AnnotationKind | "all")}>
               <TabsList variant="line" className="max-w-full overflow-x-auto">
                 <TabsTrigger value="all">All</TabsTrigger>
                 {categories.map((category) => <TabsTrigger key={category.value} value={category.value}>{category.label}</TabsTrigger>)}
@@ -136,12 +154,13 @@ export default function BookPage() {
           </div>
           {visibleAnnotations.length ? <div className="mt-9 divide-y divide-border/70">
             {visibleAnnotations.map((annotation) => <article key={annotation.id} className="flex gap-5 py-6">
-              <RiFileTextLine className="mt-1 size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
-              <div className="min-w-0">
-                <p className="text-xs font-medium uppercase tracking-[.15em] text-muted-foreground">{categories.find((category) => category.value === annotation.kind)?.label}</p>
+              <AnnotationTypeIcon kind={annotation.kind} className="mt-1 size-5 shrink-0 text-muted-foreground" />
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-medium uppercase tracking-[.15em] text-muted-foreground">{categories.find((category) => category.value === annotation.kind)?.label} · Page {annotation.page}{annotation.demo ? " · Demo" : ""}</p>
                 <h3 className="mt-2 text-lg font-medium">{annotation.title}</h3>
                 <p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-muted-foreground">{annotation.text}</p>
               </div>
+              <Button variant="ghost" size="icon-sm" aria-label={`Delete ${annotation.title}`} title="Delete annotation" className="shrink-0 text-muted-foreground hover:text-destructive" onClick={() => deleteAnnotation(annotation)}><RiDeleteBin6Line className="size-4" /></Button>
             </article>)}
           </div> : <p className="py-14 text-sm text-muted-foreground">{filter === "all" ? "No annotations saved for this book yet." : `No ${filter} annotations yet.`}</p>}
         </section>

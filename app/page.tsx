@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation"
 import { BookCover } from "@/components/book-cover"
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from "react"
 import {
-  RiAddLine, RiArrowDownSLine, RiBookOpenLine, RiDeleteBinLine,
+  RiAddLine, RiArrowDownSLine, RiBookOpenLine, RiCloseLine, RiDeleteBinLine,
   RiDownloadLine, RiMore2Line, RiSearchLine, RiUploadCloud2Line,
 } from "@remixicon/react"
 import { Button } from "@/components/ui/button"
@@ -151,9 +151,10 @@ export default function Home() {
         </section>
 
         {pdfs.length > 0 && <section aria-label="Library controls" className="mb-7 mt-7 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] sm:items-center">
-          <div className="relative w-full sm:max-w-64">
-            <RiSearchLine className="pointer-events-none absolute left-3.5 top-1/2 size-[18px] -translate-y-1/2 text-muted-foreground" />
-            <Input className="h-9 rounded-lg border-0 bg-muted/60 pl-10 placeholder:text-muted-foreground/70 focus-visible:ring-1" placeholder="Search your library..." value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search your library" />
+          <div className="relative w-full sm:max-w-72">
+            <RiSearchLine className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+            <Input className="h-10 rounded-xl border border-border/70 bg-background pl-9 pr-9 text-sm shadow-none placeholder:text-muted-foreground/70 focus-visible:border-foreground/40 focus-visible:ring-2 focus-visible:ring-foreground/10" placeholder="Search library" value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search your library" />
+            {search && <button type="button" className="absolute right-2 top-1/2 flex size-6 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" onClick={() => setSearch("")} aria-label="Clear library search"><RiCloseLine className="size-4" /></button>}
           </div>
           <Tabs className="justify-self-center" value={filter} onValueChange={(value) => setFilter(value as Filter)}>
             <TabsList className="h-9 bg-muted/60">
