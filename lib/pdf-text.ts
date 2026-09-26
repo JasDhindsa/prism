@@ -1,4 +1,6 @@
-import type { PDFPageProxy, TextContent } from "pdfjs-dist"
+import type { PDFPageProxy } from "pdfjs-dist"
+
+type TextContent = Awaited<ReturnType<PDFPageProxy["getTextContent"]>>
 
 // PDF.js 6 uses `for await` in getTextContent, which requires ReadableStream
 // async iteration. WebKit browsers can render PDFs without supporting that API.

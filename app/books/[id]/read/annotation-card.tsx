@@ -1,10 +1,10 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { AnimatePresence, motion, useReducedMotion } from "motion/react"
 import {
   RiArrowRightLine, RiCheckLine, RiCloseLine, RiDeleteBin6Line,
-  RiPauseLine, RiPictureInPicture2Line, RiPlayLine, RiRestartLine,
+  RiPlayLine, RiRestartLine,
 } from "@remixicon/react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardFooter, CardHeader } from "@/components/ui/card"
@@ -13,8 +13,9 @@ import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
 import { ManimVideo } from "@/components/manim-video"
 import { MarkdownMessage } from "@/components/markdown-message"
-import { Slider } from "@/components/ui/slider"
-import type { ReaderAnnotation, ReaderQuiz, ReaderVideo } from "@/lib/reader-types"
+import { ScrollingWaveform } from "@/components/ui/waveform"
+import type { useSelectionSpeech } from "@/hooks/use-selection-speech"
+import type { ReaderAnnotation, ReaderQuiz } from "@/lib/reader-types"
 
 type QuizProgress = { index: number; responses: Record<string, string> }
 const emptyProgress: QuizProgress = { index: 0, responses: {} }
@@ -62,43 +63,16 @@ function QuizExperience({ quiz, progress, onProgress }: { quiz: ReaderQuiz; prog
   </div>
 }
 
-function VideoExperience({ video }: { video: ReaderVideo }) {
-  if (video.jobId) return <ManimVideo jobId={video.jobId} />
-  return <DemoVideoExperience video={video} />
+function PronunciationWaveform({ onPlay, player }: { onPlay: () => void; player?: ReturnType<typeof useSelectionSpeech> }) {
+  const loading = player?.phase === "processing" || player?.phase === "preparing"
+  const playing = player?.phase === "playing"
+  return <button type="button" className={`reader-pronunciation-waveform${loading ? " reader-pronunciation-waveform-loading" : ""}`} onClick={onPlay} disabled={loading} aria-label={playing ? "Pause pronunciation" : "Play pronunciation"} aria-pressed={playing} aria-busy={loading} title={playing ? "Pause pronunciation" : "Play pronunciation"}>
+    <ScrollingWaveform height={34} barWidth={3} barGap={2} speed={30} fadeEdges={true} barColor="gray" aria-hidden="true" />
+    {loading && <span className="sr-only" role="status">Preparing pronunciation audio…</span>}
+  </button>
 }
 
-function DemoVideoExperience({ video }: { video: ReaderVideo }) {
-  const [playing, setPlaying] = useState(false)
-  const [seconds, setSeconds] = useState(0)
-  const [mini, setMini] = useState(false)
-  const reduceMotion = useReducedMotion()
-  const duration = video.scenes.length * video.secondsPerScene
-  const sceneIndex = Math.min(video.scenes.length - 1, Math.floor(seconds / video.secondsPerScene))
-  const scene = video.scenes[sceneIndex]
-  const sceneProgress = seconds >= duration ? 1 : (seconds % video.secondsPerScene) / video.secondsPerScene
-  const formatTime = (value: number) => `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`
-  useEffect(() => {
-    if (!playing) return
-    const timer = window.setTimeout(() => {
-      setSeconds(Math.min(duration, seconds + 1))
-      if (seconds + 1 >= duration) setPlaying(false)
-    }, 1000)
-    return () => window.clearTimeout(timer)
-  }, [playing, seconds, duration])
-
-  return <div className="reader-video">
-    <div className={`reader-video-frame ${mini ? "reader-video-frame-mini" : ""}`} role="img" aria-label={`Animated preview: ${scene.from} to ${scene.to}`}>
-      <AnimatePresence mode="wait" initial={false}><motion.div key={sceneIndex} initial={reduceMotion ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={reduceMotion ? undefined : { opacity: 0, y: -8 }} transition={{ duration: 0.25 }} className="reader-video-scene">
-        <strong>{scene.heading}</strong>
-        <div className="reader-video-flow"><span>{scene.from}</span><div className="reader-video-path"><motion.span animate={{ left: `${sceneProgress * 100}%` }} transition={{ duration: reduceMotion ? 0 : 0.35, ease: "linear" }} /></div><span>{scene.to}</span></div>
-        {!mini && <p>{scene.caption}</p>}
-      </motion.div></AnimatePresence>
-    </div>
-    <div className="reader-video-controls"><Button size="icon-xs" variant="ghost" aria-label={playing ? "Pause preview" : "Play preview"} onClick={() => { if (seconds >= duration) setSeconds(0); setPlaying((current) => !current) }}>{playing ? <RiPauseLine className="size-4" /> : <RiPlayLine className="size-4" />}</Button><Slider value={[seconds]} min={0} max={duration} onValueChange={(value) => setSeconds(typeof value === "number" ? value : value[0])} aria-label="Video preview position" className="reader-video-slider min-w-0 flex-1" /><span className="reader-video-time">{formatTime(seconds)} / {formatTime(duration)}</span><Button size="icon-xs" variant={mini ? "secondary" : "ghost"} aria-label={mini ? "Expand video preview" : "Compact video preview"} title={mini ? "Expand preview" : "Mini player"} onClick={() => setMini((current) => !current)}><RiPictureInPicture2Line className="size-4" /></Button></div>
-  </div>
-}
-
-export function AnnotationCard({ annotation, progressKey, onClose, onDelete, onSpeak }: { annotation: ReaderAnnotation; progressKey: string; onClose: () => void; onDelete: () => void; onSpeak: () => void }) {
+export function AnnotationCard({ annotation, progressKey, onClose, onDelete, onSpeak, pronunciationPlayer }: { annotation: ReaderAnnotation; progressKey: string; onClose: () => void; onDelete: () => void; onSpeak: () => void; pronunciationPlayer?: ReturnType<typeof useSelectionSpeech> }) {
   const [quizOpen, setQuizOpen] = useState(false)
   const [progress, setProgress] = useState<QuizProgress>(() => {
     if (typeof window === "undefined") return emptyProgress
@@ -117,10 +91,20 @@ export function AnnotationCard({ annotation, progressKey, onClose, onDelete, onS
   }
 
   const score = annotation.quiz?.questions.filter((question) => progress.responses[question.id]?.trim().toLocaleLowerCase() === question.answer.toLocaleLowerCase()).length ?? 0
+  if (annotation.kind === "pronunciation") return <motion.div layout="position" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, x: 18 }} transition={{ duration: 0.2 }}>
+    <Card size="sm" className="reader-annotation-card reader-pronunciation-card gap-0 py-0 ring-0" role="group" aria-label="Pronunciation annotation">
+      <div className="reader-pronunciation-row">
+        <PronunciationWaveform onPlay={onSpeak} player={pronunciationPlayer} />
+        <Button type="button" size="icon-sm" variant="ghost" aria-label="Close pronunciation annotation" title="Close" onClick={onClose}><RiCloseLine className="size-4" /></Button>
+        <Button type="button" size="icon-sm" variant="ghost" aria-label="Delete pronunciation annotation" title="Delete annotation" onClick={onDelete}><RiDeleteBin6Line className="size-4" /></Button>
+      </div>
+      {pronunciationPlayer?.error && <p role="alert" className="reader-pronunciation-error">{pronunciationPlayer.error}</p>}
+    </Card>
+  </motion.div>
   return <motion.div layout="position" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, x: 18 }} transition={{ duration: 0.2 }}>
     <Card size="sm" className="reader-annotation-card gap-0 py-0 ring-0">
-      <CardHeader className="reader-annotation-card-head"><h3 className="min-w-0 text-sm font-semibold leading-5">{displayTitle}{annotation.demo && <span className="ml-2 text-[10px] font-normal text-muted-foreground">Demo</span>}</h3><Button size="icon-sm" variant="ghost" aria-label={`Close ${annotation.title}`} onClick={onClose}><RiCloseLine className="size-4" /></Button></CardHeader>
-      <CardContent className="reader-annotation-card-body">{annotation.kind === "quiz" && annotation.quiz ? <div><p className="text-sm leading-6 text-muted-foreground">{progress.index >= annotation.quiz.questions.length ? `Last attempt: ${score} of ${annotation.quiz.questions.length} correct.` : progress.index > 0 ? `Question ${progress.index + 1} of ${annotation.quiz.questions.length} is next.` : `${annotation.quiz.questions.length} quick questions about this page.`}</p><Button size="sm" className="mt-4 w-full" onClick={() => setQuizOpen(true)}>{progress.index >= annotation.quiz.questions.length ? "View results" : progress.index > 0 ? "Resume quiz" : "Start quiz"} <RiArrowRightLine className="size-4" /></Button></div> : annotation.kind === "video" && annotation.video ? <VideoExperience video={annotation.video} /> : <div><MarkdownMessage text={annotation.text} />{!annotation.demo && annotation.kind !== "highlight" && <Button variant="ghost" size="sm" className="mt-3" onClick={onSpeak}><RiPlayLine className="size-4" />{annotation.kind === "pronunciation" ? "Hear pronunciation" : annotation.kind === "translation" ? "Listen to translation" : "Read aloud"}</Button>}</div>}{annotation.quote && !annotation.demo && <details className="reader-source-details"><summary>Reviewed source</summary><p dir="auto">{annotation.quote}</p></details>}</CardContent>
+      <CardHeader className="reader-annotation-card-head"><h3 className="min-w-0 text-sm font-semibold leading-5">{displayTitle}</h3><Button size="icon-sm" variant="ghost" aria-label={`Close ${annotation.title}`} onClick={onClose}><RiCloseLine className="size-4" /></Button></CardHeader>
+      <CardContent className="reader-annotation-card-body">{annotation.kind === "quiz" && annotation.quiz ? <div><p className="text-sm leading-6 text-muted-foreground">{progress.index >= annotation.quiz.questions.length ? `Last attempt: ${score} of ${annotation.quiz.questions.length} correct.` : progress.index > 0 ? `Question ${progress.index + 1} of ${annotation.quiz.questions.length} is next.` : `${annotation.quiz.questions.length} quick questions about this page.`}</p><Button size="sm" className="mt-4 w-full" onClick={() => setQuizOpen(true)}>{progress.index >= annotation.quiz.questions.length ? "View results" : progress.index > 0 ? "Resume quiz" : "Start quiz"} <RiArrowRightLine className="size-4" /></Button></div> : annotation.kind === "video" ? annotation.video?.jobId ? <ManimVideo jobId={annotation.video.jobId} /> : <p className="text-sm text-muted-foreground">This video is unavailable.</p> : <div><MarkdownMessage text={annotation.text} />{annotation.kind !== "highlight" && <Button variant="ghost" size="sm" className="mt-3" onClick={onSpeak}><RiPlayLine className="size-4" />{annotation.kind === "translation" ? "Listen to translation" : "Read aloud"}</Button>}</div>}{annotation.quote && <details className="reader-source-details"><summary>Reviewed source</summary><p dir="auto">{annotation.quote}</p></details>}</CardContent>
       <CardFooter className="reader-annotation-card-foot"><Button type="button" variant="ghost" size="sm" className="text-muted-foreground hover:text-destructive" aria-label={`Delete ${annotation.title}`} onClick={onDelete}><RiDeleteBin6Line className="size-4" /> Delete annotation</Button></CardFooter>
     </Card>
     {annotation.quiz && <Dialog open={quizOpen} onOpenChange={setQuizOpen}><DialogContent className="reader-quiz-dialog"><DialogHeader><DialogTitle>{displayTitle}</DialogTitle></DialogHeader><QuizExperience key={quizOpen ? "open" : "closed"} quiz={annotation.quiz} progress={progress} onProgress={updateProgress} /></DialogContent></Dialog>}

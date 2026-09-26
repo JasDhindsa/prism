@@ -12,7 +12,8 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { deleteLibraryPdf, getLibraryPdfs, saveLibraryPdf, type LibraryPdf } from "@/lib/library"
+import type { LibraryPdf } from "@/lib/library"
+import { useLibraryStore } from "@/lib/library-store"
 
 type Filter = "all" | "opened" | "unopened"
 type Sort = "recent" | "title" | "oldest"
@@ -28,7 +29,12 @@ function formatSize(size: number) {
 export default function Home() {
   const router = useRouter()
   const fileInput = useRef<HTMLInputElement>(null)
-  const [pdfs, setPdfs] = useState<LibraryPdf[]>([])
+  const books = useLibraryStore((state) => state.books)
+  const ids = useLibraryStore((state) => state.ids)
+  const loadAll = useLibraryStore((state) => state.loadAll)
+  const saveBook = useLibraryStore((state) => state.save)
+  const removeBook = useLibraryStore((state) => state.remove)
+  const pdfs = useMemo(() => ids.map((id) => books[id]).filter((book): book is LibraryPdf => Boolean(book)), [books, ids])
   const [loading, setLoading] = useState(true)
   const [adding, setAdding] = useState(false)
   const [dragging, setDragging] = useState(false)
@@ -38,11 +44,10 @@ export default function Home() {
   const [error, setError] = useState("")
 
   useEffect(() => {
-    getLibraryPdfs()
-      .then(setPdfs)
+    loadAll()
       .catch(() => setError("Your local library could not be loaded. Please refresh and try again."))
       .finally(() => setLoading(false))
-  }, [])
+  }, [loadAll])
 
   const openedCount = pdfs.filter((pdf) => pdf.lastOpenedAt !== null).length
   const visiblePdfs = useMemo(() => {
@@ -71,14 +76,13 @@ export default function Home() {
           id: crypto.randomUUID(), name: file.name, title: titleFromFilename(file.name),
           size: file.size, addedAt: Date.now(), lastOpenedAt: null, file,
         }
-        await saveLibraryPdf(pdf)
+        await saveBook(pdf)
         added.push(pdf)
       } catch {
         setError("A PDF could not be saved. Your browser storage may be full.")
       }
     }
     if (added.length) {
-      setPdfs((current) => [...current, ...added])
       setFilter("all")
       setSearch("")
     }
@@ -117,8 +121,7 @@ export default function Home() {
   async function removePdf(pdf: LibraryPdf) {
     if (!window.confirm("Remove “" + pdf.title + "” from your library?")) return
     try {
-      await deleteLibraryPdf(pdf.id)
-      setPdfs((current) => current.filter((item) => item.id !== pdf.id))
+      await removeBook(pdf.id)
     } catch {
       setError("This PDF could not be removed. Please try again.")
     }

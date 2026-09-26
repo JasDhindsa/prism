@@ -17,7 +17,9 @@ export function validateInput(value: unknown): ReaderInput {
   if (!((value.selection as string)?.trim() || value.image || (value.prompt as string)?.trim())) throw new AiError("Select a passage or ask a question first.", 400)
   if (value.image && !/^data:image\/jpeg;base64,[A-Za-z0-9+/]+={0,2}$/.test(value.image as string)) throw new AiError("The selection image must be a JPEG.", 400)
   if (value.history !== undefined && (!Array.isArray(value.history) || value.history.length > 12 || value.history.some((message) => !isObject(message) || !["user", "assistant"].includes(message.role as string) || typeof message.text !== "string" || message.text.length > 6000))) throw new AiError("Invalid conversation history.", 400)
-  if (value.proficiency !== undefined && !isReadingProficiency(value.proficiency)) throw new AiError("Invalid reading proficiency.", 400)
+  if (value.documentPassages !== undefined && (!Array.isArray(value.documentPassages) || value.documentPassages.length > 6 || value.documentPassages.some((passage) => !isObject(passage) || !Number.isInteger(passage.page) || (passage.page as number) < 1 || typeof passage.text !== "string" || passage.text.length > 1500))) throw new AiError("Invalid document passages.", 400)
+  if (value.documentPassages !== undefined && value.action !== "video") throw new AiError("Document passages are only supported for videos.", 400)
+  if (value.proficiency !== undefined && !isReadingProficiency(value.proficiency)) throw new AiError("Invalid response depth.", 400)
   if ((value.sourceConfirmed !== undefined && typeof value.sourceConfirmed !== "boolean") || (value.detailed !== undefined && typeof value.detailed !== "boolean") || (value.mode !== undefined && !["voice", "text"].includes(value.mode as string))) throw new AiError("Invalid generation options.", 400)
   return value as ReaderInput
 }
@@ -30,15 +32,16 @@ const quizSchema = { type: "OBJECT", required: ["title", "answer", "questions"],
   } } },
 } }
 const speechSchema = { type: "OBJECT", required: ["title", "answer", "speechText"], properties: { title: s, answer: s, speechText: s } }
+// Keep the provider schema small; validate scene counts and visual constraints below.
 const videoSchema = { type: "OBJECT", required: ["title", "summary", "scenes"], properties: {
   title: s, summary: s,
-  scenes: { type: "ARRAY", minItems: 3, maxItems: 8, items: { type: "OBJECT", required: ["heading", "caption", "narration", "visual"], properties: {
+  scenes: { type: "ARRAY", items: { type: "OBJECT", required: ["heading", "caption", "narration", "visual"], properties: {
     heading: s, caption: s, narration: s,
     visual: { type: "OBJECT", required: ["type", "labels", "values", "points"], properties: {
-      type: { type: "STRING", enum: ["flow", "graph", "bars", "comparison", "numberline", "triangle", "equation"] },
-      labels: { type: "ARRAY", minItems: 2, maxItems: 4, items: s },
-      values: { type: "ARRAY", maxItems: 4, items: { type: "NUMBER" } },
-      points: { type: "ARRAY", maxItems: 20, items: { type: "OBJECT", required: ["x", "y"], properties: { x: { type: "NUMBER" }, y: { type: "NUMBER" } } } },
+      type: s,
+      labels: { type: "ARRAY", items: s },
+      values: { type: "ARRAY", items: { type: "NUMBER" } },
+      points: { type: "ARRAY", items: { type: "OBJECT", properties: { x: { type: "NUMBER" }, y: { type: "NUMBER" } } } },
     } },
   } } },
 } }
@@ -81,8 +84,8 @@ export async function generateReader(input: ReaderInput): Promise<ReaderResponse
   }
   const instruction = {
     ask: "Answer the reader's question using the selected PDF content and relevant conversation history. Use well-formatted Markdown: headings, emphasis, lists, fenced code blocks, and tables when useful. Write math with $inline$ or $$display$$ notation. Respond in the reader's language unless they request another. Keep the answer clear and grounded in the actual passage or diagram.",
-    adapt: "Adapt only selectedContent, which is freshly extracted OCR of the selected area, into targetLanguage at readerProficiency. Return only the adapted passage; no introduction, instructions, pronunciation guide, summary, or discussion of your process. Preserve every important fact, relationship, qualification, name, number, and argument. Basic: short sentences and common words, with essential technical terms explained naturally inline. Intermediate: natural phrasing, full reasoning, and brief inline definitions of unfamiliar terms. Advanced: precise technical vocabulary, sophisticated phrasing, and all nuance; do not simplify into beginner language or add unsupported information. Help the reader develop their language skills by retaining useful subject vocabulary and making its meaning understandable in context. If source language differs from targetLanguage, use natural forms of politeness, register, and communication conventions in targetLanguage. When a difficult concept benefits from an analogy, weave in a brief explicitly illustrative comparison from everyday life or language usage familiar to speakers of targetLanguage. Keep the analogy distinct from document claims; do not infer personal nationality or cultural identity. Use Markdown and math only where useful.",
-    translate: "Translate the selected passage into targetLanguage (default English). Preserve its meaning and terminology. Return only the faithfully translated passage as plain text, with no prefacing text. Match the chosen language proficiency without omitting facts or changing the source meaning. Do not replace source examples with cultural analogies in a translation.",
+    adapt: "Adapt only selectedContent, which is freshly extracted OCR of the selected area, into targetLanguage at responseDepth. Return only the adapted passage; no introduction, instructions, pronunciation guide, summary, or discussion of your process. Preserve every important fact, relationship, qualification, name, number, and argument. Simple (beginner): short sentences and common words, with essential technical terms explained naturally inline. Balanced (intermediate): natural phrasing, full reasoning, and brief inline definitions of unfamiliar terms. In depth (advanced): precise technical vocabulary, sophisticated phrasing, and all nuance; do not simplify into beginner language or add unsupported information. Help the reader develop their language skills by retaining useful subject vocabulary and making its meaning understandable in context. If source language differs from targetLanguage, use natural forms of politeness, register, and communication conventions in targetLanguage. When a difficult concept benefits from an analogy, weave in a brief explicitly illustrative comparison from everyday life or language usage familiar to speakers of targetLanguage. Keep the analogy distinct from document claims; do not infer personal nationality or cultural identity. Use Markdown and math only where useful.",
+    translate: "Translate the selected passage into targetLanguage (default English). Preserve its meaning and terminology. Return only the faithfully translated passage as plain text, with no prefacing text. Match the chosen response depth in targetLanguage without omitting facts or changing the source meaning. Do not replace source examples with cultural analogies in a translation.",
   }[(input.action === "explain" ? "adapt" : input.action) as "ask" | "adapt" | "translate"]
   if (!instruction) throw new AiError("Use video generation for video requests.", 400)
   return { answer: await generateContent(input, instruction) }
@@ -91,24 +94,34 @@ export async function generateVideoPlan(input: ReaderInput): Promise<VideoPlan> 
   const detailed = input.detailed !== false
   const minimum = detailed ? 6 : 3
   const maximum = detailed ? 8 : 4
-  const schema = { ...videoSchema, properties: { ...videoSchema.properties, scenes: { ...videoSchema.properties.scenes, minItems: minimum, maxItems: maximum } } }
-  const data = parseJson(await generateContent(input, `Create a ${minimum}-${maximum} scene narrated visual lesson grounded specifically in the reviewed selection. Follow the reader's topic and instructions. Write narration in targetLanguage (English when unspecified or auto). ${detailed ? "Make a detailed 2-4 minute lesson: introduce the question, unpack the key definitions, develop the reasoning in small steps, show a worked example or useful analogy, explain a subtle point or common misconception, connect the ideas, and finish with a recap. Cover the important details of this specific passage, not just its general subject. Use 40-70 words of narration per scene." : "Make a concise lesson with 20-40 words of narration per scene."} Use mathematical animation: dark backgrounds, color-coded geometry, transformations, and step-by-step visual reasoning. Every scene needs a heading (max 75 characters), a caption (max 180 characters), and narration (max 1000 characters). Visuals support: flow (2-4 ordered labels connected by arrows), comparison (2-4 labeled concepts), bars (2-4 labels plus matching positive numeric values), graph (two axis labels plus 3-20 ordered x/y points), numberline (2-4 labels with matching numeric values), triangle (right triangle with squares on the sides; labels a, b, c and exactly the two positive leg lengths in values), equation (2-4 equation steps as Unicode text in labels, no LaTeX). Prefer triangle and transforming equations for geometry. Vary the visuals to actually teach the concept. Every visual must include labels, values, and points; use empty arrays for irrelevant fields. Labels max 60 characters. Source facts must be faithful; do not invent statistics. A worked example with invented simple numbers is allowed only when the narration and caption clearly label it as an illustrative example. Explain the visual in the narration instead of merely reading its labels. Keep terminology, names, and quantities from the selection accurate. No Python code or executable expressions: your storyboard will be compiled into Manim code.`, schema))
-  if (!Array.isArray(data.scenes) || data.scenes.length < minimum || data.scenes.length > maximum) throw new AiError("The AI returned an incomplete storyboard. Try again.")
-  const scenes: VideoScene[] = data.scenes.map((raw) => {
-    if (!isObject(raw) || !isObject(raw.visual)) throw new AiError("The AI returned an invalid scene.")
-    const visual = raw.visual
-    if (!["flow", "graph", "bars", "comparison", "numberline", "triangle", "equation"].includes(visual.type as string) || !Array.isArray(visual.labels) || visual.labels.length < 2 || visual.labels.length > 4 || !Array.isArray(visual.values) || visual.values.length > 4 || !Array.isArray(visual.points) || visual.points.length > 20) throw new AiError("The AI returned an unsupported visual.")
-    const labels = visual.labels.map((label) => text(label, 60, "visual label"))
-    const values = visual.values as number[]
-    if (values.some((value) => typeof value !== "number" || !Number.isFinite(value) || Math.abs(value) > 1e6)) throw new AiError("The AI returned invalid visual values.")
-    const points = visual.points.map((point) => {
-      if (!isObject(point) || typeof point.x !== "number" || typeof point.y !== "number" || !Number.isFinite(point.x) || !Number.isFinite(point.y) || Math.abs(point.x) > 1e6 || Math.abs(point.y) > 1e6) throw new AiError("The AI returned invalid graph points.")
-      return { x: point.x, y: point.y }
+  const evidence = [input.selection ?? "", ...(input.documentPassages ?? []).map((passage) => passage.text)].join("\n")
+  const sourceNumbers = new Set(evidence.match(/(?<![\d.])-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![\d.])/g)?.map((value) => Number(value.replaceAll(",", ""))) ?? [])
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const data = parseJson(await generateContent(input, `Create a ${minimum}-${maximum} scene narrated visual lesson centered on the reviewed selection, using relevant documentPassages from the same PDF for broader context. Follow the reader's topic and instructions. Cite the page number in narration or caption when using a fact found only in documentPassages. Write narration in targetLanguage (English when unspecified or auto). ${detailed ? "Make a detailed 2-4 minute lesson: introduce the question, unpack the key definitions, develop the reasoning in small steps, show a worked example or useful analogy, explain a subtle point or common misconception, connect the ideas, and finish with a recap. Cover the important details of this specific passage, not just its general subject. Use 40-70 words of narration per scene." : "Make a concise lesson with 20-40 words of narration per scene."} Use mathematical animation: dark backgrounds, color-coded geometry, transformations, and step-by-step visual reasoning. Every scene needs a heading (max 75 characters), a caption (max 180 characters), and narration (max 1000 characters). Visuals support: flow (2-4 ordered labels connected by arrows), comparison (2-4 labeled concepts), bars (2-4 labels plus matching positive numeric values), graph (two axis labels plus 3-20 ordered x/y points), numberline (2-4 labels with matching numeric values), triangle (right triangle with squares on the sides; labels a, b, c and exactly the two positive leg lengths in values), equation (2-4 equation steps as Unicode text in labels, no LaTeX). Prefer triangle and transforming equations for geometry. Vary the visuals to actually teach the concept. Every visual must include labels, values, and points; use empty arrays for irrelevant fields. Labels max 60 characters. Source facts must be faithful. Every numeric value in a bar chart, graph, number line, or triangle must appear explicitly in selectedContent or documentPassages. If neither source has relevant numbers, use qualitative flow, comparison, or equation visuals instead. Never invent numbers, even for an illustrative example. Explain the visual in the narration instead of merely reading its labels. Keep terminology, names, and quantities from the selection accurate. No Python code or executable expressions: your storyboard will be compiled into Manim code. ${attempt ? "The previous storyboard contained chart values absent from selectedContent and documentPassages. Replace all unsupported numeric visuals with qualitative ones." : ""}`, videoSchema))
+    if (!Array.isArray(data.scenes) || data.scenes.length < minimum || data.scenes.length > maximum) throw new AiError("The AI returned an incomplete storyboard. Try again.")
+    const scenes: VideoScene[] = data.scenes.map((raw) => {
+      if (!isObject(raw) || !isObject(raw.visual)) throw new AiError("The AI returned an invalid scene.")
+      const visual = raw.visual
+      if (!["flow", "graph", "bars", "comparison", "numberline", "triangle", "equation"].includes(visual.type as string) || !Array.isArray(visual.labels) || visual.labels.length < 2 || visual.labels.length > 4 || !Array.isArray(visual.values) || visual.values.length > 4 || !Array.isArray(visual.points) || visual.points.length > 20) throw new AiError("The AI returned an unsupported visual.")
+      const labels = visual.labels.map((label) => text(label, 60, "visual label"))
+      const values = visual.values as number[]
+      if (values.some((value) => typeof value !== "number" || !Number.isFinite(value) || Math.abs(value) > 1e6)) throw new AiError("The AI returned invalid visual values.")
+      const points = visual.points.map((point) => {
+        if (!isObject(point) || typeof point.x !== "number" || typeof point.y !== "number" || !Number.isFinite(point.x) || !Number.isFinite(point.y) || Math.abs(point.x) > 1e6 || Math.abs(point.y) > 1e6) throw new AiError("The AI returned invalid graph points.")
+        return { x: point.x, y: point.y }
+      })
+      if (visual.type === "graph" && (points.length < 3 || new Set(points.map((point) => point.x)).size < 2)) throw new AiError("The AI returned an empty graph.")
+      if (["bars", "numberline"].includes(visual.type as string) && (values.length !== labels.length || (visual.type === "bars" && values.some((value) => value <= 0)))) throw new AiError("The AI returned mismatched visual labels and values.")
+      if (visual.type === "triangle" && (values.length !== 2 || values.some((value) => value <= 0))) throw new AiError("The AI returned invalid triangle dimensions.")
+      return { heading: text(raw.heading, 100, "scene heading"), caption: text(raw.caption, 220, "caption"), narration: text(raw.narration, 1000, "narration"), visual: { type: visual.type as VideoVisual["type"], labels, values, points } }
     })
-    if (visual.type === "graph" && (points.length < 3 || new Set(points.map((point) => point.x)).size < 2)) throw new AiError("The AI returned an empty graph.")
-    if (["bars", "numberline"].includes(visual.type as string) && (values.length !== labels.length || (visual.type === "bars" && values.some((value) => value <= 0)))) throw new AiError("The AI returned mismatched visual labels and values.")
-    if (visual.type === "triangle" && (values.length !== 2 || values.some((value) => value <= 0))) throw new AiError("The AI returned invalid triangle dimensions.")
-    return { heading: text(raw.heading, 100, "scene heading"), caption: text(raw.caption, 220, "caption"), narration: text(raw.narration, 1000, "narration"), visual: { type: visual.type as VideoVisual["type"], labels, values, points } }
-  })
-  return { title: text(data.title, 100, "video title"), summary: text(data.summary, 1200, "video summary"), language: input.language || "English", scenes }
+    const ungroundedNumber = scenes.some((scene) => {
+      const { type, values, points } = scene.visual
+      const numbers = type === "graph" ? points.flatMap((point) => [point.x, point.y]) : ["bars", "numberline", "triangle"].includes(type) ? values : []
+      return numbers.some((value) => !sourceNumbers.has(value))
+    })
+    if (ungroundedNumber) continue
+    return { title: text(data.title, 100, "video title"), summary: text(data.summary, 1200, "video summary"), language: input.language || "English", scenes }
+  }
+  throw new AiError("The storyboard included chart numbers absent from the reviewed selection and retrieved document passages. Try a smaller selection or remove numeric charts from the instructions.")
 }

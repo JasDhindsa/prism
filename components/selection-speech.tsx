@@ -8,7 +8,7 @@ import type { useSelectionSpeech } from "@/hooks/use-selection-speech"
 
 type Props = { player: ReturnType<typeof useSelectionSpeech> }
 export function SelectionSpeech({ player }: Props) {
-  if (!player.open || typeof document === "undefined") return null
+  if (!player.open || player.label === "Pronunciation" || typeof document === "undefined") return null
   const loading = player.phase === "processing" || player.phase === "preparing"
   return createPortal(<aside className="reader-selection-audio" aria-label={player.label}>
     <div className="reader-selection-audio-heading"><span>{player.label}</span><Button variant="ghost" size="icon-xs" aria-label="Close audio player" onClick={player.close}><RiCloseLine className="size-3.5" /></Button></div>

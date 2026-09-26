@@ -13,6 +13,7 @@ import { AnnotationTypeIcon } from "@/components/annotation-type-icon"
 import { Button } from "@/components/ui/button"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { ButtonGroup } from "@/components/ui/button-group"
+import { Kbd } from "@/components/ui/kbd"
 import { Bubble, BubbleContent } from "@/components/ui/bubble"
 import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
@@ -24,8 +25,10 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
-import { getLibraryPdf, saveLibraryPdf, type LibraryPdf } from "@/lib/library"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { useLibraryStore } from "@/lib/library-store"
 import { readPdfPageText } from "@/lib/pdf-text"
+import { retrieveDocumentPassages } from "@/lib/document-retrieval"
 import type { AnnotationRect, ReaderAction, ReaderAnnotation, ReaderInput, ReaderResponse } from "@/lib/reader-types"
 import { SpeechPlayer } from "@/components/speech-player"
 import { MarkdownMessage } from "@/components/markdown-message"
@@ -37,15 +40,43 @@ import { proficiencyLevels, isReadingProficiency, type ReadingProficiency } from
 import { readSelectionImage } from "@/lib/selection-ocr"
 import { SelectionSpeech } from "@/components/selection-speech"
 import { useSelectionSpeech } from "@/hooks/use-selection-speech"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select"
 import "./reader.css"
 
 type Selection = { page: number; text: string; rects: AnnotationRect[]; image?: string }
 type Result = { page: number; snippet: string }
 type ChatMessage = { id: string; role: "user" | "assistant"; text: string; speechText?: string; voice?: boolean }
+type SpeechPlayer = ReturnType<typeof useSelectionSpeech>
+
+const annotationColors = ["#f59e0b", "#10b981", "#8b5cf6", "#ec4899", "#0ea5e9", "#f97316", "#14b8a6", "#6366f1", "#f43f5e", "#84cc16"] as const
+const annotationColor = (index?: number) => annotationColors[index ?? 0] ?? annotationColors[0]
+
+function restoreAnnotationColors(annotations: ReaderAnnotation[]): ReaderAnnotation[] {
+  const ordered = [...annotations].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || a.id.localeCompare(b.id))
+  const assigned = new Map<string, number>()
+  const usedByPage = new Map<number, Set<number>>()
+  for (const annotation of ordered) {
+    const used = usedByPage.get(annotation.page) ?? new Set<number>()
+    const available = annotationColors.findIndex((_, index) => !used.has(index))
+    const colorIndex = Number.isInteger(annotation.colorIndex) && annotation.colorIndex! >= 0 && annotation.colorIndex! < annotationColors.length
+      ? annotation.colorIndex!
+      : available >= 0 ? available : assigned.size % annotationColors.length
+    assigned.set(annotation.id, colorIndex)
+    used.add(colorIndex)
+    usedByPage.set(annotation.page, used)
+  }
+  return annotations.map((annotation) => ({ ...annotation, colorIndex: assigned.get(annotation.id) }))
+}
 
 function IconButton({ label, className = "", children, ...props }: React.ComponentProps<typeof Button> & { label: string }) {
   return <Button variant="ghost" size="icon-sm" aria-label={label} title={label} className={`reader-icon ${className}`} {...props}>{children}</Button>
+}
+
+function ReaderToolButton({ label, shortcut, className = "", children, ...props }: React.ComponentProps<typeof Button> & { label: string; shortcut: string }) {
+  return <Tooltip>
+    <TooltipTrigger render={<Button variant="ghost" size="icon-sm" className={`reader-tool-button ${className}`} aria-label={label} aria-keyshortcuts={shortcut.toLowerCase()} {...props} />}>{children}</TooltipTrigger>
+    <TooltipContent side="bottom">{label}<Kbd>{shortcut}</Kbd></TooltipContent>
+  </Tooltip>
 }
 
 function Thumbnail({ pdf, number, active, onClick }: { pdf: PDFDocumentProxy; number: number; active: boolean; onClick: () => void }) {
@@ -103,7 +134,7 @@ function layoutAnnotationPins(annotations: ReaderAnnotation[], width: number, he
   })
 }
 
-function PdfPage({ pdf, number, zoom, areaEnabled, selection, annotations, openAnnotationId, onSelect, onClearSelection, onSelectionAction, onOpenAnnotation, onCloseAnnotation, onDeleteAnnotation, onSpeakAnnotation, onError }: { pdf: PDFDocumentProxy; number: number; zoom: number; areaEnabled: boolean; selection: Selection | null; annotations: ReaderAnnotation[]; openAnnotationId: string | null; onSelect: (selection: Selection) => void; onClearSelection: () => void; onSelectionAction: (action: Exclude<ReaderAction, "ask">) => void; onOpenAnnotation: (annotation: ReaderAnnotation) => void; onCloseAnnotation: (id: string) => void; onDeleteAnnotation: (annotation: ReaderAnnotation) => void; onSpeakAnnotation: (annotation: ReaderAnnotation) => void; onError: (message: string) => void }) {
+function PdfPage({ pdf, number, zoom, areaEnabled, selection, annotations, openAnnotationId, audioAnnotationId, speechPlayer, onSelect, onClearSelection, onSelectionAction, onOpenAnnotation, onCloseAnnotation, onDeleteAnnotation, onSpeakAnnotation, onError }: { pdf: PDFDocumentProxy; number: number; zoom: number; areaEnabled: boolean; selection: Selection | null; annotations: ReaderAnnotation[]; openAnnotationId: string | null; audioAnnotationId: string | null; speechPlayer: SpeechPlayer; onSelect: (selection: Selection) => void; onClearSelection: () => void; onSelectionAction: (action: Exclude<ReaderAction, "ask">) => void; onOpenAnnotation: (annotation: ReaderAnnotation) => void; onCloseAnnotation: (id: string) => void; onDeleteAnnotation: (annotation: ReaderAnnotation) => void; onSpeakAnnotation: (annotation: ReaderAnnotation) => void; onError: (message: string) => void }) {
   const wrap = useRef<HTMLDivElement>(null)
   const canvas = useRef<HTMLCanvasElement>(null)
   const [width, setWidth] = useState(800)
@@ -111,10 +142,11 @@ function PdfPage({ pdf, number, zoom, areaEnabled, selection, annotations, openA
   const [hoveredAnnotationId, setHoveredAnnotationId] = useState<string | null>(null)
   const pins = useMemo(() => layoutAnnotationPins(annotations.filter((annotation) => annotation.page === number && annotation.rects?.length), dimensions.width, dimensions.height), [annotations, number, dimensions.width, dimensions.height])
   const activeAnnotationId = hoveredAnnotationId || openAnnotationId
-  const sourceAreas = new Map<string, { rect: AnnotationRect; active: boolean }>()
+  const sourceAreas = new Map<string, { rect: AnnotationRect; active: boolean; color: string }>()
   for (const { annotation } of pins) for (const rect of annotation.rects || []) {
     const key = `${rect.x}:${rect.y}:${rect.width}:${rect.height}`
-    sourceAreas.set(key, { rect, active: sourceAreas.get(key)?.active === true || annotation.id === activeAnnotationId })
+    const active = annotation.id === activeAnnotationId
+    if (!sourceAreas.get(key)?.active || active) sourceAreas.set(key, { rect, active, color: annotationColor(annotation.colorIndex) })
   }
   const [drag, setDrag] = useState<AnnotationRect | null>(null)
   const dragStart = useRef<{ x: number; y: number } | null>(null)
@@ -183,16 +215,16 @@ function PdfPage({ pdf, number, zoom, areaEnabled, selection, annotations, openA
         <ButtonGroup aria-label="Create annotation"><Button variant="ghost" size="sm" onClick={() => onSelectionAction("adapt")}>Adapt</Button><Button variant="ghost" size="sm" onClick={() => onSelectionAction("quiz")}>Quiz</Button><Button variant="ghost" size="sm" onClick={() => onSelectionAction("translate")}>Translate</Button><Button variant="ghost" size="sm" onClick={() => onSelectionAction("pronunciation")}>Pronounce</Button><Button variant="ghost" size="sm" onClick={() => onSelectionAction("video")}>Video</Button><IconButton label="Clear selection" onClick={onClearSelection}><RiCloseLine className="size-4" /></IconButton></ButtonGroup>
       </div>}
       {!areaEnabled && <svg className="reader-annotation-targets" width={dimensions.width} height={dimensions.height} aria-hidden="true">
-        {[...sourceAreas].map(([key, { rect, active }]) => <rect key={key} className={active ? "reader-annotation-area reader-annotation-area-active" : "reader-annotation-area"} x={rect.x * dimensions.width} y={rect.y * dimensions.height} width={rect.width * dimensions.width} height={rect.height * dimensions.height} rx={3} />)}
-        {pins.map(({ annotation, position, target }) => position && <path key={annotation.id} className={annotation.id === activeAnnotationId ? "reader-annotation-link reader-annotation-link-active" : "reader-annotation-link"} d={`M ${target.x} ${target.y} L ${position.x} ${position.y}`} />)}
+        {[...sourceAreas].map(([key, { rect, active, color }]) => <rect key={key} className={active ? "reader-annotation-area reader-annotation-area-active" : "reader-annotation-area"} style={{ "--annotation-color": color } as React.CSSProperties} x={rect.x * dimensions.width} y={rect.y * dimensions.height} width={rect.width * dimensions.width} height={rect.height * dimensions.height} rx={3} />)}
+        {pins.map(({ annotation, position, target }) => position && <path key={annotation.id} className={annotation.id === activeAnnotationId ? "reader-annotation-link reader-annotation-link-active" : "reader-annotation-link"} style={{ "--annotation-color": annotationColor(annotation.colorIndex) } as React.CSSProperties} d={`M ${target.x} ${target.y} L ${position.x} ${position.y}`} />)}
       </svg>}
       {!areaEnabled && pins.map(({ annotation, position }) => {
         if (!position) return null
         const isOpen = openAnnotationId === annotation.id
         return <Popover key={annotation.id} open={isOpen} onOpenChange={(open, details) => { if (open) onOpenAnnotation(annotation); else if (["trigger-press", "escape-key", "close-press"].includes(details.reason)) onCloseAnnotation(annotation.id) }}>
-          <PopoverTrigger render={<Button size="icon-xs" variant="secondary" className="reader-note-pin" style={{ left: position.x, top: position.y }} aria-label={`Open ${annotation.kind}: ${annotation.title}, selected area on page ${number}`} title={`${annotation.kind}: ${annotation.title}`} aria-pressed={isOpen} onPointerEnter={() => setHoveredAnnotationId(annotation.id)} onPointerLeave={() => setHoveredAnnotationId(null)} onFocus={() => setHoveredAnnotationId(annotation.id)} onBlur={() => setHoveredAnnotationId(null)}><AnnotationTypeIcon kind={annotation.kind} className="size-3" /></Button>} />
+          <PopoverTrigger render={<Button size="icon-xs" variant="secondary" className="reader-note-pin" data-annotation-id={annotation.id} style={{ left: position.x, top: position.y, "--annotation-color": annotationColor(annotation.colorIndex) } as React.CSSProperties} aria-label={`Open ${annotation.kind}: ${annotation.title}, selected area on page ${number}`} title={`${annotation.kind}: ${annotation.title}`} aria-pressed={isOpen} onPointerEnter={() => setHoveredAnnotationId(annotation.id)} onPointerLeave={() => setHoveredAnnotationId(null)} onFocus={() => setHoveredAnnotationId(annotation.id)} onBlur={() => setHoveredAnnotationId(null)}><AnnotationTypeIcon kind={annotation.kind} className="size-3" /></Button>} />
           <PopoverContent side="right" align="start" sideOffset={14} className="reader-note-popover">
-            <AnnotationCard annotation={annotation} progressKey={`prism-quiz-progress:${pdf.fingerprints[0]}:${annotation.id}`} onClose={() => onCloseAnnotation(annotation.id)} onDelete={() => onDeleteAnnotation(annotation)} onSpeak={() => onSpeakAnnotation(annotation)} />
+            <AnnotationCard annotation={annotation} progressKey={`prism-quiz-progress:${pdf.fingerprints[0]}:${annotation.id}`} onClose={() => onCloseAnnotation(annotation.id)} onDelete={() => onDeleteAnnotation(annotation)} onSpeak={() => onSpeakAnnotation(annotation)} pronunciationPlayer={audioAnnotationId === annotation.id ? speechPlayer : undefined} />
           </PopoverContent>
         </Popover>
       })}
@@ -200,7 +232,7 @@ function PdfPage({ pdf, number, zoom, areaEnabled, selection, annotations, openA
   </div>
 }
 
-function LazyPdfPage({ pdf, number, zoom, areaEnabled, selection, annotations, openAnnotationId, scrollRoot, onSelect, onClearSelection, onSelectionAction, onOpenAnnotation, onCloseAnnotation, onDeleteAnnotation, onSpeakAnnotation, onError }: { pdf: PDFDocumentProxy; number: number; zoom: number; areaEnabled: boolean; selection: Selection | null; annotations: ReaderAnnotation[]; openAnnotationId: string | null; scrollRoot: React.RefObject<HTMLDivElement | null>; onSelect: (selection: Selection) => void; onClearSelection: () => void; onSelectionAction: (action: Exclude<ReaderAction, "ask">) => void; onOpenAnnotation: (annotation: ReaderAnnotation) => void; onCloseAnnotation: (id: string) => void; onDeleteAnnotation: (annotation: ReaderAnnotation) => void; onSpeakAnnotation: (annotation: ReaderAnnotation) => void; onError: (message: string) => void }) {
+function LazyPdfPage({ pdf, number, zoom, areaEnabled, selection, annotations, openAnnotationId, audioAnnotationId, speechPlayer, scrollRoot, onSelect, onClearSelection, onSelectionAction, onOpenAnnotation, onCloseAnnotation, onDeleteAnnotation, onSpeakAnnotation, onError }: { pdf: PDFDocumentProxy; number: number; zoom: number; areaEnabled: boolean; selection: Selection | null; annotations: ReaderAnnotation[]; openAnnotationId: string | null; audioAnnotationId: string | null; speechPlayer: SpeechPlayer; scrollRoot: React.RefObject<HTMLDivElement | null>; onSelect: (selection: Selection) => void; onClearSelection: () => void; onSelectionAction: (action: Exclude<ReaderAction, "ask">) => void; onOpenAnnotation: (annotation: ReaderAnnotation) => void; onCloseAnnotation: (id: string) => void; onDeleteAnnotation: (annotation: ReaderAnnotation) => void; onSpeakAnnotation: (annotation: ReaderAnnotation) => void; onError: (message: string) => void }) {
   const section = useRef<HTMLElement>(null)
   const [visible, setVisible] = useState(number <= 2)
   const [height, setHeight] = useState<number | null>(null)
@@ -224,16 +256,19 @@ function LazyPdfPage({ pdf, number, zoom, areaEnabled, selection, annotations, o
   }, [visible])
 
   return <section ref={section} id={`reader-page-${number}`} data-page-number={number} className="reader-page-section" style={!visible && height ? { minHeight: height } : undefined} aria-label={`Page ${number}`}>
-    {visible || annotations.some((annotation) => annotation.page === number && annotation.id === openAnnotationId) ? <PdfPage pdf={pdf} number={number} zoom={zoom} areaEnabled={areaEnabled} selection={selection} annotations={annotations} openAnnotationId={openAnnotationId} onSelect={onSelect} onClearSelection={onClearSelection} onSelectionAction={onSelectionAction} onOpenAnnotation={onOpenAnnotation} onCloseAnnotation={onCloseAnnotation} onDeleteAnnotation={onDeleteAnnotation} onSpeakAnnotation={onSpeakAnnotation} onError={onError} /> : <div className="reader-page-placeholder" style={height ? { minHeight: Math.max(300, height - 28) } : undefined} aria-hidden="true" />}
+    {visible || annotations.some((annotation) => annotation.page === number && annotation.id === openAnnotationId) ? <PdfPage pdf={pdf} number={number} zoom={zoom} areaEnabled={areaEnabled} selection={selection} annotations={annotations} openAnnotationId={openAnnotationId} audioAnnotationId={audioAnnotationId} speechPlayer={speechPlayer} onSelect={onSelect} onClearSelection={onClearSelection} onSelectionAction={onSelectionAction} onOpenAnnotation={onOpenAnnotation} onCloseAnnotation={onCloseAnnotation} onDeleteAnnotation={onDeleteAnnotation} onSpeakAnnotation={onSpeakAnnotation} onError={onError} /> : <div className="reader-page-placeholder" style={height ? { minHeight: Math.max(300, height - 28) } : undefined} aria-hidden="true" />}
     <span className="reader-page-caption">{number}</span>
   </section>
 }
 
 export default function ReaderPage() {
   const { id } = useParams<{ id: string }>()
-  const [book, setBook] = useState<LibraryPdf | null>(null)
+  const book = useLibraryStore((state) => state.books[id] ?? null)
+  const loadBook = useLibraryStore((state) => state.loadOne)
+  const saveBook = useLibraryStore((state) => state.save)
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null)
   const [loading, setLoading] = useState(true)
+  const [reloadKey, setReloadKey] = useState(0)
   const [error, setError] = useState("")
   const [page, setPage] = useState(1)
   const [zoom, setZoom] = useState(1)
@@ -248,7 +283,6 @@ export default function ReaderPage() {
   const [results, setResults] = useState<Result[]>([])
   const [assistantOpen, setAssistantOpen] = useState(false)
   const [openAnnotationId, setOpenAnnotationId] = useState<string | null>(null)
-  const [hiddenDemoIds, setHiddenDemoIds] = useState<string[]>([])
   const [prompt, setPrompt] = useState("")
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatError, setChatError] = useState("")
@@ -259,6 +293,7 @@ export default function ReaderPage() {
   const [proficiency, setProficiency] = useState<ReadingProficiency>("intermediate")
   const [preferencesReady, setPreferencesReady] = useState(false)
   const selectionSpeech = useSelectionSpeech()
+  const [audioAnnotationId, setAudioAnnotationId] = useState<string | null>(null)
   const directController = useRef<AbortController | null>(null)
   const [pendingAnnotation, setPendingAnnotation] = useState<{ action: Exclude<ReaderAction, "ask">; selection: Selection } | null>(null)
   const [voiceOpen, setVoiceOpen] = useState(false)
@@ -274,15 +309,21 @@ export default function ReaderPage() {
   const voiceStop = useRef(voice.stop)
   useEffect(() => { voiceStop.current = voice.stop }, [voice.stop])
   const stage = useRef<HTMLDivElement>(null)
+  const openedDeepLink = useRef<string | null>(null)
   const annotations = savedAnnotations
 
   useEffect(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem("prism-reader-preferences") || "null") as { language?: string; proficiency?: string } | null
-      if (saved?.language && languages.some((item) => item.name === saved.language)) setLanguage(saved.language)
-      if (isReadingProficiency(saved?.proficiency)) setProficiency(saved.proficiency)
-    } catch { /* Use defaults when stored preferences are unavailable. */ }
-    setPreferencesReady(true)
+    let active = true
+    queueMicrotask(() => {
+      if (!active) return
+      try {
+        const saved = JSON.parse(localStorage.getItem("prism-reader-preferences") || "null") as { language?: string; proficiency?: string } | null
+        if (saved?.language && languages.some((item) => item.name === saved.language)) setLanguage(saved.language)
+        if (isReadingProficiency(saved?.proficiency)) setProficiency(saved.proficiency)
+      } catch { /* Use defaults when stored preferences are unavailable. */ }
+      setPreferencesReady(true)
+    })
+    return () => { active = false }
   }, [])
   useEffect(() => {
     if (preferencesReady) try { localStorage.setItem("prism-reader-preferences", JSON.stringify({ language, proficiency })) } catch { /* Preferences still apply in this session. */ }
@@ -292,32 +333,80 @@ export default function ReaderPage() {
   useEffect(() => {
     let active = true
     let loadingTask: PDFDocumentLoadingTask | undefined
+    queueMicrotask(() => { if (active) { setPdf(null); setLoading(true); setError("") } })
     async function open() {
-      const result = await getLibraryPdf(id)
-      if (!result || !active) { if (active) setLoading(false); return }
-      setBook(result)
+      const result = await loadBook(id, { fresh: true })
+      if (!active) return
+      if (!result) throw new Error("This book is no longer in your library.")
       const { getDocument, GlobalWorkerOptions } = await import("pdfjs-dist")
+      if (!active) return
       GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs"
-      const bytes = new Uint8Array(await result.file.arrayBuffer())
-      loadingTask = getDocument({ data: bytes })
-      const loaded = await loadingTask.promise
-      if (!active) { await loadingTask.destroy(); return }
+      let loaded: PDFDocumentProxy | undefined
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const bytes = new Uint8Array(await result.file.arrayBuffer())
+        if (!active) return
+        loadingTask = getDocument({ data: bytes })
+        try { loaded = await loadingTask.promise; break }
+        catch (cause) {
+          await loadingTask.destroy().catch(() => undefined)
+          loadingTask = undefined
+          if (!active) return
+          if (attempt === 1) throw cause
+        }
+      }
+      if (!loaded) return
+      if (!active) { await loadingTask?.destroy(); return }
       setPdf(loaded)
       const updated = { ...result, lastOpenedAt: Date.now() }
-      void saveLibraryPdf(updated).catch(() => undefined)
+      void saveBook(updated).catch(() => undefined)
       setLoading(false)
     }
-    void open().catch(() => { if (active) { setError("This PDF could not be opened. Try an unencrypted PDF."); setLoading(false) } })
+    void open().catch((cause: unknown) => { if (active) { setError(cause instanceof Error ? cause.message : "This PDF could not be opened."); setLoading(false) } })
     try {
       const saved: unknown = JSON.parse(localStorage.getItem(`prism-annotations:${id}`) ?? "[]")
-      if (Array.isArray(saved)) queueMicrotask(() => { if (active) setSavedAnnotations(saved as ReaderAnnotation[]) })
+      if (Array.isArray(saved)) {
+        const realAnnotations = (saved as ReaderAnnotation[]).filter((annotation) => !annotation.id?.startsWith("demo-columbian-") && !("demo" in annotation && annotation.demo))
+        const restored = restoreAnnotationColors(realAnnotations)
+        if (realAnnotations.length !== saved.length || restored.some((annotation, index) => annotation.colorIndex !== realAnnotations[index].colorIndex)) {
+          try { localStorage.setItem(`prism-annotations:${id}`, JSON.stringify(restored)) } catch { /* Keep colors stable for this session if storage is unavailable. */ }
+        }
+        queueMicrotask(() => { if (active) setSavedAnnotations(restored) })
+      }
     } catch { /* Invalid saved notes should not block reading. */ }
-    try {
-      const hidden: unknown = JSON.parse(localStorage.getItem(`prism-hidden-demo-annotations:${id}`) ?? "[]")
-      if (Array.isArray(hidden)) queueMicrotask(() => { if (active) setHiddenDemoIds(hidden as string[]) })
-    } catch { /* Invalid preview state should not block reading. */ }
     return () => { active = false; void loadingTask?.destroy() }
-  }, [id])
+  }, [id, loadBook, saveBook, reloadKey])
+
+  useEffect(() => {
+    if (!pdf || !stage.current) return
+    const targetId = new URLSearchParams(window.location.search).get("annotation")
+    if (!targetId || openedDeepLink.current === targetId) return
+    const target = savedAnnotations.find((annotation) => annotation.id === targetId)
+    if (!target) return
+
+    let frame = 0
+    let attempts = 0
+    const scrollToAnnotation = () => {
+      const pin = Array.from(stage.current?.querySelectorAll<HTMLElement>("[data-annotation-id]") ?? [])
+        .find((element) => element.dataset.annotationId === targetId)
+      if (pin) {
+        pin.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" })
+        openedDeepLink.current = targetId
+      } else if (++attempts < 30) {
+        frame = requestAnimationFrame(scrollToAnnotation)
+      } else {
+        document.getElementById(`reader-page-${target.page}`)?.scrollIntoView({ behavior: "smooth", block: "center" })
+        openedDeepLink.current = targetId
+      }
+    }
+    frame = requestAnimationFrame(() => {
+      setPage(target.page)
+      setAreaEnabled(false)
+      setSelection(null)
+      setOpenAnnotationId(target.id)
+      frame = requestAnimationFrame(scrollToAnnotation)
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [pdf, savedAnnotations])
 
   const goToPage = useCallback((number: number) => {
     if (!pdf) return
@@ -347,46 +436,37 @@ export default function ReaderPage() {
     return () => { container.removeEventListener("scroll", onScroll); cancelAnimationFrame(frame) }
   }, [pdf])
 
-  useEffect(() => {
-    function onKey(event: KeyboardEvent) {
-      if (event.defaultPrevented || event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement) return
-      if (event.target instanceof Element && event.target.closest("[data-slot=select-trigger], [role=listbox], [role=option]")) return
-      if (event.key === "ArrowRight") goToPage(page + 1)
-      if (event.key === "ArrowLeft") goToPage(page - 1)
-      if (event.key === "Escape") { voiceStop.current(); setVoiceOpen(false); setSelection(null); setAssistantOpen(false); setAreaEnabled(false); setOpenAnnotationId(null) }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") { event.preventDefault(); setSearchOpen(true) }
-    }
-    window.addEventListener("keydown", onKey)
-    return () => window.removeEventListener("keydown", onKey)
-  }, [goToPage, page])
-
-  function saveAnnotation(annotation: ReaderAnnotation, open = true) {
-    const next = [annotation, ...savedAnnotations]
-    try { localStorage.setItem(`prism-annotations:${id}`, JSON.stringify(next)); setSavedAnnotations(next); if (open) setOpenAnnotationId(annotation.id) }
-    catch { setError("This annotation could not be saved. Browser storage may be full.") }
+  function saveAnnotation(annotation: ReaderAnnotation, open = true): boolean {
+    const usedOnPage = new Set(savedAnnotations.filter((item) => item.page === annotation.page).map((item) => item.colorIndex))
+    const available = annotationColors.findIndex((_, index) => !usedOnPage.has(index))
+    const colorIndex = available >= 0 ? available : (Math.max(-1, ...savedAnnotations.map((item) => item.colorIndex ?? -1)) + 1) % annotationColors.length
+    const next = [{ ...annotation, colorIndex }, ...savedAnnotations]
+    try { localStorage.setItem(`prism-annotations:${id}`, JSON.stringify(next)); setSavedAnnotations(next); if (open) setOpenAnnotationId(annotation.id); return true }
+    catch { setError("This annotation could not be saved. Browser storage may be full."); return false }
   }
 
   function openAnnotation(annotation: ReaderAnnotation) {
     voice.stop(); setVoiceOpen(false)
+    if (audioAnnotationId && audioAnnotationId !== annotation.id) { selectionSpeech.close(); setAudioAnnotationId(null) }
     setOpenAnnotationId(annotation.id)
     setAssistantOpen(false)
   }
 
   function closeAnnotation(annotationId: string) {
+    if (audioAnnotationId === annotationId) { selectionSpeech.close(); setAudioAnnotationId(null) }
     setOpenAnnotationId((current) => current === annotationId ? null : current)
+  }
+
+  function toggleAreaSelection() {
+    if (!areaEnabled && openAnnotationId) closeAnnotation(openAnnotationId)
+    setAreaEnabled(!areaEnabled)
   }
 
   function deleteAnnotation(annotation: ReaderAnnotation) {
     try {
-      if (annotation.id.startsWith("demo-columbian-")) {
-        const next = [...hiddenDemoIds, annotation.id]
-        localStorage.setItem(`prism-hidden-demo-annotations:${id}`, JSON.stringify(next))
-        setHiddenDemoIds(next)
-      } else {
-        const next = savedAnnotations.filter((item) => item.id !== annotation.id)
-        localStorage.setItem(`prism-annotations:${id}`, JSON.stringify(next))
-        setSavedAnnotations(next)
-      }
+      const next = savedAnnotations.filter((item) => item.id !== annotation.id)
+      localStorage.setItem(`prism-annotations:${id}`, JSON.stringify(next))
+      setSavedAnnotations(next)
       closeAnnotation(annotation.id)
     } catch { setError("This annotation could not be deleted. Browser storage may be unavailable.") }
   }
@@ -439,6 +519,7 @@ export default function ReaderPage() {
     if (voice.active) voice.stop()
     setVoiceOpen(false)
     selectionSpeech.close()
+    setAudioAnnotationId(null)
     setAssistantOpen(false); setError("")
     if (action === "video" || action === "quiz") setPendingAnnotation({ action, selection })
     else void createDirectAnnotation(action, selection)
@@ -448,13 +529,14 @@ export default function ReaderPage() {
     if (busyRef.current) return
     busyRef.current = true
     setPendingAnnotation(null); setAssistantOpen(false)
-    setBusy(true); setBusyLabel(action === "video" ? "Planning your detailed animated lesson…" : "Generating from your reviewed selection…"); setError("")
+    setBusy(true); setBusyLabel(action === "video" ? "Finding relevant passages in this PDF…" : "Generating from your reviewed selection…"); setError("")
     try {
-      const result = await requestAi({ action, selection: draft.text, context: draft.text, image: selected.image, prompt: [draft.topic ? `Focus: ${draft.topic}` : "", draft.instructions].filter(Boolean).join("\n"), language: draft.language, sourceConfirmed: true, detailed: draft.detailed })
+      const documentPassages = action === "video" && pdf ? await retrieveDocumentPassages(pdf, draft.text, draft.topic, selected.page) : undefined
+      if (action === "video") setBusyLabel("Planning your animated lesson…")
+      const result = await requestAi({ action, selection: draft.text, context: action === "video" ? undefined : draft.text, documentPassages, image: selected.image, prompt: [draft.topic ? `Focus: ${draft.topic}` : "", draft.instructions].filter(Boolean).join("\n"), language: draft.language, sourceConfirmed: true, detailed: draft.detailed })
       const kind = (action === "adapt" || action === "explain") ? "adaptation" : action === "translate" ? "translation" : action
       const title = result.title || draft.topic || { adapt: `Adapted · ${proficiencyLevels.find((level) => level.value === proficiency)?.label}`, explain: "Adapted passage", quiz: "Check your understanding", translate: `${draft.language} translation`, pronunciation: "How to say it", video: "See it in motion" }[action]
-      saveAnnotation({ id: crypto.randomUUID(), kind, title, text: result.answer, page: selected.page, quote: draft.text, rects: selected.rects, quiz: result.quiz, speechText: result.speechText, language: draft.language, proficiency, video: result.video ? { jobId: result.video.id, scenes: [], secondsPerScene: 0 } : undefined, createdAt: Date.now() })
-      setSelection(null)
+      if (saveAnnotation({ id: crypto.randomUUID(), kind, title, text: result.answer, page: selected.page, quote: draft.text, rects: selected.rects, quiz: result.quiz, speechText: result.speechText, language: draft.language, proficiency, video: result.video ? { jobId: result.video.id } : undefined, createdAt: Date.now() })) setSelection(null)
     } catch (caught) { setError(caught instanceof Error ? caught.message : "The annotation could not be created.") }
     finally { busyRef.current = false; setBusy(false); setBusyLabel("") }
   }
@@ -467,18 +549,21 @@ export default function ReaderPage() {
     const requestSignal = spoken ? selectionSpeech.begin(action === "translate" ? `Translation · ${language}` : "Pronunciation") : (directController.current = new AbortController()).signal
     setBusy(true); setBusyLabel("Reading your selection…"); setOpenAnnotationId(null); setError("")
     try {
-      if (requestSignal.aborted) return
+      if (requestSignal.aborted) { if (action === "pronunciation") setError("This browser could not start audio playback."); return }
       const extracted = selected.image ? await readSelectionImage(selected.image, language, requestSignal, { fresh: true }) : selected.text
       if (requestSignal.aborted) return
       if (!extracted.trim()) throw new Error("No readable text was found in this area. Select a clearer passage and try again.")
-      setBusyLabel(action === "adapt" || action === "explain" ? `Adapting to ${proficiencyLevels.find((level) => level.value === proficiency)?.label.toLowerCase()}…` : action === "translate" ? `Translating into ${language}…` : "Preparing pronunciation…")
+      setBusyLabel(action === "adapt" || action === "explain" ? "Adapting the selected passage…" : action === "translate" ? `Translating into ${language}…` : "Preparing pronunciation…")
       const result: ReaderResponse = action === "pronunciation"
         ? { answer: extracted, speechText: extracted, title: "Pronunciation" }
         : await requestAi({ action, selection: extracted, sourceConfirmed: true }, requestSignal)
       if (requestSignal.aborted) return
       const adapted = action === "adapt" || action === "explain"
       const title = result.title || (adapted ? `Adapted · ${proficiencyLevels.find((level) => level.value === proficiency)?.label}` : action === "translate" ? `${language} translation` : "Pronunciation")
-      saveAnnotation({ id: crypto.randomUUID(), kind: adapted ? "adaptation" : action === "translate" ? "translation" : "pronunciation", title, text: result.answer, speechText: result.speechText || (action === "translate" ? result.answer : undefined), speechLanguage: action === "translate" ? speechLanguageCode(language) : result.speechLanguage, page: selected.page, language, proficiency, quote: extracted || undefined, rects: selected.rects, createdAt: Date.now() }, adapted)
+      const annotationId = crypto.randomUUID()
+      if (action === "pronunciation") setAudioAnnotationId(annotationId)
+      const saved = saveAnnotation({ id: annotationId, kind: adapted ? "adaptation" : action === "translate" ? "translation" : "pronunciation", title, text: action === "pronunciation" ? "" : result.answer, speechText: result.speechText || (action === "translate" ? result.answer : undefined), speechLanguage: action === "translate" ? speechLanguageCode(language) : result.speechLanguage, page: selected.page, language, proficiency, quote: extracted || undefined, rects: selected.rects, createdAt: Date.now() }, adapted || action === "pronunciation")
+      if (!saved) { if (spoken) selectionSpeech.close(); if (action === "pronunciation") setAudioAnnotationId(null); return }
       setSelection(null)
       if (spoken) {
         setBusyLabel("Preparing audio…")
@@ -487,7 +572,7 @@ export default function ReaderPage() {
     } catch (caught) {
       if (!requestSignal.aborted) {
         const message = caught instanceof Error ? caught.message : "This selection could not be processed."
-        if (spoken) selectionSpeech.fail(message)
+        if (spoken) { selectionSpeech.fail(message); if (action === "pronunciation") setError(message) }
         else setError(message)
       }
     } finally { busyRef.current = false; setBusy(false); setBusyLabel("") }
@@ -495,7 +580,12 @@ export default function ReaderPage() {
 
   async function speakAnnotation(annotation: ReaderAnnotation) {
     if (busyRef.current) return
-    voice.stop(); setVoiceOpen(false); setOpenAnnotationId(null)
+    voice.stop(); setVoiceOpen(false)
+    if (annotation.kind === "pronunciation") {
+      setOpenAnnotationId(annotation.id)
+      if (audioAnnotationId === annotation.id && selectionSpeech.open && selectionSpeech.data.length && selectionSpeech.phase !== "error") { selectionSpeech.toggle(); return }
+      setAudioAnnotationId(annotation.id)
+    } else { setOpenAnnotationId(null); setAudioAnnotationId(null) }
     const text = annotation.kind === "pronunciation"
       ? annotation.quote || annotation.speechText || annotation.text
       : annotation.speechText || annotation.text
@@ -519,7 +609,7 @@ export default function ReaderPage() {
     const pageText = !selected && pdf ? await readPdfPageText(await pdf.getPage(number), 6000).catch(() => "") : ""
     const image = selected?.image || (!selected && !pageText.trim() ? await pageImage(number) : undefined)
     if (signal.aborted) throw new DOMException("Conversation ended", "AbortError")
-    return { text: selected ? `Reader language: ${language}. Reading proficiency: ${proficiency}. Match this level and use relatable examples without assuming nationality.\nSelected area on page ${number}:\n${selected.image ? "Read the cropped image below." : selected.text}` : `Reader language: ${language}. Reading proficiency: ${proficiency}. Match this level and use relatable examples without assuming nationality.\nPage ${number}:\n${pageText}`, image, history: voiceHistory.current.slice(-6).map(({ role, text }) => ({ role, text: text.slice(0, 2000) })) }
+    return { text: selected ? `AI response language: ${language}. Response depth: ${proficiency}. Match this detail level in the response language and use relatable examples without assuming nationality.\nSelected area on page ${number}:\n${selected.image ? "Read the cropped image below." : selected.text}` : `AI response language: ${language}. Response depth: ${proficiency}. Match this detail level in the response language and use relatable examples without assuming nationality.\nPage ${number}:\n${pageText}`, image, history: voiceHistory.current.slice(-6).map(({ role, text }) => ({ role, text: text.slice(0, 2000) })) }
   }
 
   function toggleVoice() {
@@ -532,6 +622,41 @@ export default function ReaderPage() {
     setVoiceOpen(true); setAssistantOpen(false); setOpenAnnotationId(null)
     void voice.start()
   }
+
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if (event.defaultPrevented || event.isComposing || event.repeat) return
+      const target = event.target
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return
+      if (target instanceof Element && target.closest('[contenteditable="true"], [role="dialog"], [role="listbox"], [role="option"], [data-slot="select-content"]')) return
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "f") {
+        event.preventDefault()
+        event.stopPropagation()
+        setSearchOpen(true)
+        return
+      }
+      if (event.metaKey || event.ctrlKey || event.altKey) return
+      const key = event.key.toLowerCase()
+      if (!["p", "/", "s", "v", "a"].includes(key)) {
+        if (target instanceof Element && target.closest('[data-slot="select-trigger"], button, a')) return
+        if (event.key === "ArrowRight") goToPage(page + 1)
+        if (event.key === "ArrowLeft") goToPage(page - 1)
+        if (event.key === "Escape") { voiceStop.current(); setVoiceOpen(false); setSelection(null); setAssistantOpen(false); setAreaEnabled(false); setOpenAnnotationId(null) }
+        return
+      }
+      event.preventDefault()
+      event.stopPropagation()
+      switch (key) {
+        case "p": setSidebar((value) => !value); break
+        case "/": setSearchOpen((value) => !value); break
+        case "s": toggleAreaSelection(); break
+        case "v": if (!busyRef.current) toggleVoice(); break
+        case "a": voice.stop(); setVoiceOpen(false); setAssistantOpen((value) => !value); break
+      }
+    }
+    window.addEventListener("keydown", onKey, true)
+    return () => window.removeEventListener("keydown", onKey, true)
+  })
 
   async function askAi() {
     const question = prompt.trim()
@@ -559,17 +684,17 @@ export default function ReaderPage() {
         <Link href={`/books/${encodeURIComponent(id)}`} aria-label="Back to book" className="reader-back"><RiArrowLeftLine className="size-5" /></Link>
         <div className="min-w-0"><strong className="block truncate">{book?.title || "Opening PDF…"}</strong><span>{pdf ? `${pdf.numPages} pages` : "Your document"}</span></div>
       </div>
-      <ButtonGroup className="reader-toolbar" aria-label="Reader tools">
-        <Button variant={sidebar ? "secondary" : "ghost"} size="icon-sm" className="reader-tool-button" aria-label="Toggle page thumbnails" title="Pages" aria-pressed={sidebar} onClick={() => setSidebar((value) => !value)}><RiLayoutLeftLine className="size-[18px]" /></Button>
-        <Button variant={searchOpen ? "secondary" : "ghost"} size="icon-sm" className="reader-tool-button" aria-label="Search PDF" title="Search" aria-pressed={searchOpen} onClick={() => setSearchOpen((value) => !value)}><RiSearchLine className="size-[18px]" /></Button>
-        <Button variant={areaEnabled ? "secondary" : "ghost"} size="icon-sm" className="reader-tool-button" aria-label="Select an area" title="Select area" aria-pressed={areaEnabled} onClick={() => setAreaEnabled((value) => !value)}><RiCropLine className="size-[18px]" /></Button>
-        <Button variant={voiceOpen ? "secondary" : "ghost"} size="icon-sm" className={`reader-tool-button ${voiceOpen ? "reader-mic-active" : ""}`} aria-label={voiceOpen ? voice.phase === "paused" || voice.phase === "idle" ? "Resume voice conversation" : "End voice conversation" : "Start voice conversation"} title={voiceOpen ? voice.phase === "paused" || voice.phase === "idle" ? "Resume voice conversation" : "End voice conversation" : "Talk with Prism"} aria-pressed={voiceOpen} disabled={busy} onClick={toggleVoice}><RiMicLine className="size-[18px]" /></Button>
-        <Button variant={assistantOpen ? "secondary" : "ghost"} size="icon-sm" className="reader-tool-button reader-ai-toggle" aria-label="Ask Prism AI" title="Ask Prism" aria-pressed={assistantOpen} onClick={() => { voice.stop(); setVoiceOpen(false); setAssistantOpen((value) => !value) }}><RiSparklingLine className="size-[18px]" /></Button>
-      </ButtonGroup>
+      <TooltipProvider><ButtonGroup className="reader-toolbar" aria-label="Reader tools">
+        <ReaderToolButton label="Toggle page thumbnails" shortcut="P" variant={sidebar ? "secondary" : "ghost"} aria-pressed={sidebar} onClick={() => setSidebar((value) => !value)}><RiLayoutLeftLine className="size-[18px]" /></ReaderToolButton>
+        <ReaderToolButton label="Search PDF" shortcut="/" variant={searchOpen ? "secondary" : "ghost"} aria-pressed={searchOpen} onClick={() => setSearchOpen((value) => !value)}><RiSearchLine className="size-[18px]" /></ReaderToolButton>
+        <ReaderToolButton label="Select an area" shortcut="S" variant={areaEnabled ? "secondary" : "ghost"} aria-pressed={areaEnabled} onClick={toggleAreaSelection}><RiCropLine className="size-[18px]" /></ReaderToolButton>
+        <ReaderToolButton label={voiceOpen ? voice.phase === "paused" || voice.phase === "idle" ? "Resume voice conversation" : "End voice conversation" : "Start voice conversation"} shortcut="V" variant={voiceOpen ? "secondary" : "ghost"} className={voiceOpen ? "reader-mic-active" : ""} aria-pressed={voiceOpen} disabled={busy} onClick={toggleVoice}><RiMicLine className="size-[18px]" /></ReaderToolButton>
+        <ReaderToolButton label="Ask Prism AI" shortcut="A" variant={assistantOpen ? "secondary" : "ghost"} className="reader-ai-toggle" aria-pressed={assistantOpen} onClick={() => { voice.stop(); setVoiceOpen(false); setAssistantOpen((value) => !value) }}><RiSparklingLine className="size-[18px]" /></ReaderToolButton>
+      </ButtonGroup></TooltipProvider>
       <div className="reader-header-end">
-        <div className="reader-preferences" aria-label="Reading preferences">
-          <Select value={language} items={languages.map((item) => ({ value: item.name, label: item.name }))} onValueChange={(value) => { if (typeof value === "string") setLanguage(value) }}><SelectTrigger size="sm" aria-label="Native language" title="Native language" className="reader-preference-trigger"><SelectValue /></SelectTrigger><SelectContent align="end">{languages.map((item) => <SelectItem key={item.code} value={item.name}>{item.name}</SelectItem>)}</SelectContent></Select>
-          <Select value={proficiency} items={proficiencyLevels.map((level) => ({ value: level.value, label: level.label }))} onValueChange={(value) => { if (isReadingProficiency(value)) setProficiency(value) }}><SelectTrigger size="sm" aria-label="Reading proficiency" title="Reading proficiency" className="reader-preference-trigger"><SelectValue /></SelectTrigger><SelectContent align="end">{proficiencyLevels.map((level) => <SelectItem key={level.value} value={level.value}>{level.label}</SelectItem>)}</SelectContent></Select>
+        <div className="reader-preferences" aria-label="AI response preferences">
+          <Select value={language} items={languages.map((item) => ({ value: item.name, label: item.name }))} onValueChange={(value) => { if (typeof value === "string") setLanguage(value) }}><SelectTrigger size="sm" aria-label="AI answer language" title="Language for AI answers and narration" className="reader-preference-trigger"><SelectValue /></SelectTrigger><SelectContent align="end"><SelectGroup><SelectLabel>AI answer language</SelectLabel>{languages.map((item) => <SelectItem key={item.code} value={item.name}>{item.name}</SelectItem>)}</SelectGroup></SelectContent></Select>
+          <Select value={proficiency} items={proficiencyLevels.map((level) => ({ value: level.value, label: level.label }))} onValueChange={(value) => { if (isReadingProficiency(value)) setProficiency(value) }}><SelectTrigger size="sm" aria-label={`AI response depth in ${language}`} title={`How detailed AI answers are in ${language}; the PDF is unchanged`} className="reader-preference-trigger"><span className="text-muted-foreground">Depth</span><SelectValue /></SelectTrigger><SelectContent align="end" className="min-w-64"><SelectGroup><SelectLabel>AI response depth in {language}<span className="block font-normal">Changes AI output, not the PDF.</span></SelectLabel>{proficiencyLevels.map((level) => <SelectItem key={level.value} value={level.value}><span className="flex min-w-0 flex-col"><span>{level.label}</span><span className="text-xs font-normal whitespace-normal text-muted-foreground">{level.description}</span></span></SelectItem>)}</SelectGroup></SelectContent></Select>
         </div>
       <ButtonGroup className="reader-zoom"><Button variant="ghost" size="icon-sm" aria-label="Zoom out" title="Zoom out" disabled={zoom <= 0.7} onClick={() => setZoom((value) => Math.max(0.7, +(value - 0.1).toFixed(1)))}>−</Button><Button variant="ghost" size="sm" className="reader-fit-button" aria-label={zoom === 1 ? "Fit to available width" : `${Math.round(zoom * 100)} percent of fit width. Reset to fit.`} title="Fit to width" onClick={() => setZoom(1)}>{zoom === 1 ? "Fit" : `${Math.round(zoom * 100)}%`}</Button><Button variant="ghost" size="icon-sm" aria-label="Zoom in" title="Zoom in" disabled={zoom >= 1.6} onClick={() => setZoom((value) => Math.min(1.6, +(value + 0.1).toFixed(1)))}>+</Button></ButtonGroup></div>
     </header>
@@ -581,7 +706,7 @@ export default function ReaderPage() {
         {searchOpen && <div className="reader-search" role="search" aria-label="Search this PDF">
           <form onSubmit={searchPdf} className="reader-search-form">
             <RiSearchLine className="reader-search-icon" aria-hidden="true" />
-            <input autoFocus value={search} onChange={(event) => { setSearch(event.target.value); setSearched(false); setResults([]) }} placeholder="Find in document" aria-label="Search this PDF" />
+            <input autoFocus value={search} onChange={(event) => { setSearch(event.target.value); setSearched(false); setResults([]) }} onKeyDown={(event) => { if (event.key === "Escape") setSearchOpen(false) }} placeholder="Find in document" aria-label="Search this PDF" />
             <button type="submit" className="reader-search-submit" disabled={searching || !search.trim()}>{searching ? "Finding…" : "Find"}</button>
             <button type="button" className="reader-search-close" onClick={() => setSearchOpen(false)} aria-label="Close search"><RiCloseLine className="size-4" /></button>
           </form>
@@ -589,13 +714,13 @@ export default function ReaderPage() {
           {!searching && searched && results.length === 0 && <p className="reader-search-empty">No matches found.</p>}
         </div>}
         <div ref={stage} className="reader-stage">
-          {loading ? <div className="reader-loading"><Skeleton className="h-[65vh] w-full max-w-3xl rounded-sm" /></div> : !pdf ? <div className="reader-error"><h1>Couldn’t open this PDF</h1><p>{error || "This book is no longer in your library."}</p><Link href={`/books/${encodeURIComponent(id)}`}>Back to book</Link></div> : <div className="reader-pages">
-            {Array.from({ length: pdf.numPages }, (_, index) => <LazyPdfPage key={index + 1} pdf={pdf} number={index + 1} zoom={zoom} areaEnabled={areaEnabled} selection={selection} annotations={annotations} openAnnotationId={openAnnotationId} scrollRoot={stage} onSelect={(value) => { setSelection(value); setAreaEnabled(false); setError("") }} onClearSelection={() => setSelection(null)} onSelectionAction={prepareAnnotation} onOpenAnnotation={openAnnotation} onCloseAnnotation={closeAnnotation} onDeleteAnnotation={deleteAnnotation} onSpeakAnnotation={speakAnnotation} onError={setError} />)}
+          {loading ? <div className="reader-loading"><Skeleton className="h-[65vh] w-full max-w-3xl rounded-sm" /></div> : !pdf ? <div className="reader-error"><h1>Couldn’t open this PDF</h1><p>{error || "This book is no longer in your library."}</p><Button variant="secondary" onClick={() => setReloadKey((value) => value + 1)}>Try again</Button><Link href={`/books/${encodeURIComponent(id)}`}>Back to book</Link></div> : <div className="reader-pages">
+            {Array.from({ length: pdf.numPages }, (_, index) => <LazyPdfPage key={index + 1} pdf={pdf} number={index + 1} zoom={zoom} areaEnabled={areaEnabled} selection={selection} annotations={annotations} openAnnotationId={openAnnotationId} audioAnnotationId={audioAnnotationId} speechPlayer={selectionSpeech} scrollRoot={stage} onSelect={(value) => { setSelection(value); setAreaEnabled(false); setError("") }} onClearSelection={() => setSelection(null)} onSelectionAction={prepareAnnotation} onOpenAnnotation={openAnnotation} onCloseAnnotation={closeAnnotation} onDeleteAnnotation={deleteAnnotation} onSpeakAnnotation={speakAnnotation} onError={setError} />)}
           </div>}
         </div>
         {areaEnabled && <p className="reader-area-hint">Drag over a page to select an area <span>· Esc to cancel</span></p>}
         {pdf && <div className="reader-page-indicator">Page {page} <span>/ {pdf.numPages}</span></div>}
-        {busy && !assistantOpen && !selectionSpeech.open && <p role="status" className="reader-global-error reader-ai-progress"><Spinner className="size-4" />{busyLabel}</p>}
+        {busy && !assistantOpen && <div role="status" aria-live="polite" className="reader-annotation-progress"><span className="reader-annotation-progress-icon"><Spinner className="size-4" /></span><div><strong>Creating annotation</strong><span>{busyLabel}</span></div></div>}
         {error && !assistantOpen && pdf && <p role="alert" className="reader-global-error">{error}</p>}
       </div>
 

@@ -120,7 +120,7 @@ export async function renderVideoJob(id: string) {
     await writeFile(path.join(directory, "captions.vtt"), `WEBVTT\n\n${cues.join("\n")}`)
     job = { ...job, status: "rendering", stage: "Rendering Manim animation", progress: 55 }
     await writeJob(job)
-    const rendered = await execute(python(), ["-m", "manim", "render", "-qm", "--disable_caching", "--format", "mp4", "--media_dir", path.join(directory, "media"), "-o", "lesson", path.join(directory, "scene.py"), "PrismLesson"], { cwd: directory, env: rendererEnv(directory), timeout: 600_000, maxBuffer: 8_000_000 })
+    const rendered = await execute(python(), ["-m", "manim", "render", "-qh", "--fps", "30", "--disable_caching", "--format", "mp4", "--media_dir", path.join(directory, "media"), "-o", "lesson", path.join(directory, "scene.py"), "PrismLesson"], { cwd: directory, env: rendererEnv(directory), timeout: 900_000, maxBuffer: 8_000_000 })
     await writeFile(path.join(directory, "render.log"), rendered.stdout + rendered.stderr)
     const movie = await findMovie(path.join(directory, "media"))
     if (!movie) throw new AiError("Manim did not produce a video. Retry with a smaller selection.")
@@ -130,7 +130,7 @@ export async function renderVideoJob(id: string) {
     try { await execute(process.env.FFMPEG_PATH || "ffmpeg", ["-y", "-i", movie, "-c", "copy", "-movflags", "+faststart", final], { env: rendererEnv(directory), timeout: 30_000, maxBuffer: 1_000_000 }) }
     catch { await copyFile(movie, final) }
     await access(final)
-    await writeFile(path.join(directory, "README.txt"), "Prism Manim lesson\n\nInstall: pip install manim==0.20.1\nRender: manim -qm scene.py PrismLesson\n\nKeep the narration MP3 files beside scene.py for narrated playback.\nRequires Cairo/Pango and FFmpeg. No LaTeX is required.\n")
+    await writeFile(path.join(directory, "README.txt"), "Prism Manim lesson\n\nInstall: pip install manim==0.20.1\nRender: manim -qh --fps 30 scene.py PrismLesson\n\nKeep the narration MP3 files beside scene.py for narrated playback.\nRequires Cairo/Pango and FFmpeg. No LaTeX is required.\n")
     const files = ["scene.py", "plan.json", "captions.vtt", "README.txt", ...timings.flatMap((timing) => timing.audio ? [timing.audio] : [])]
     await execute(python(), ["-c", "import json, sys, zipfile; files=json.loads(sys.argv[1]); archive=zipfile.ZipFile('source.zip','w',zipfile.ZIP_DEFLATED); [archive.write(name, name) for name in files]; archive.close()", JSON.stringify(files)], { cwd: directory, env: rendererEnv(directory), timeout: 20_000 })
     await writeJob({ ...job, chapters, status: "ready", stage: "Your video is ready", progress: 100, videoUrl: `/api/videos/${id}/video`, captionsUrl: `/api/videos/${id}/captions`, bundleUrl: `/api/videos/${id}/bundle` })

@@ -27,8 +27,7 @@ export type VideoJob = {
   error?: string
   warning?: string
 }
-// Keep previously saved demo annotations readable.
-export type ReaderVideo = { jobId?: string; scenes: { heading: string; caption: string; from: string; to: string }[]; secondsPerScene: number }
+export type ReaderVideo = { jobId: string }
 export type ReaderAnnotation = {
   id: string
   kind: AnnotationKind
@@ -38,19 +37,20 @@ export type ReaderAnnotation = {
   page: number
   quote?: string
   rects?: AnnotationRect[]
+  colorIndex?: number
   quiz?: ReaderQuiz
   video?: ReaderVideo
   speechText?: string
   speechLanguage?: string
   language?: string
   proficiency?: ReadingProficiency
-  demo?: boolean
 }
 export type ReaderAction = "ask" | "adapt" | "explain" | "quiz" | "translate" | "pronunciation" | "video"
 export type ReaderInput = {
   action: ReaderAction
   selection?: string
   context?: string
+  documentPassages?: { page: number; text: string }[]
   prompt?: string
   image?: string
   language?: string

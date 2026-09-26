@@ -3,13 +3,13 @@
 import Link from "next/link"
 import { useParams, useRouter } from "next/navigation"
 import { useEffect, useState } from "react"
-import { RiArrowLeftLine, RiBookOpenLine, RiDeleteBin6Line, RiDownloadLine } from "@remixicon/react"
+import { RiArrowLeftLine, RiArrowRightLine, RiBookOpenLine, RiDeleteBin6Line } from "@remixicon/react"
 import { AnnotationTypeIcon } from "@/components/annotation-type-icon"
 import { BookCover } from "@/components/book-cover"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { getLibraryPdf, type LibraryPdf } from "@/lib/library"
+import { useLibraryStore } from "@/lib/library-store"
 import type { AnnotationKind, ReaderAnnotation } from "@/lib/reader-types"
 
 const categories: { value: AnnotationKind; label: string }[] = [
@@ -28,25 +28,26 @@ function formatSize(size: number) {
 export default function BookPage() {
   const { id } = useParams<{ id: string }>()
   const router = useRouter()
-  const [book, setBook] = useState<LibraryPdf | null>(null)
+  const book = useLibraryStore((state) => state.books[id] ?? null)
+  const loadBook = useLibraryStore((state) => state.loadOne)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
   const [savedAnnotations, setSavedAnnotations] = useState<ReaderAnnotation[]>([])
-  const [hiddenDemoIds, setHiddenDemoIds] = useState<string[]>([])
   const [filter, setFilter] = useState<AnnotationKind | "all">("all")
 
   useEffect(() => {
     let active = true
-    getLibraryPdf(id)
-      .then((result) => { if (active) setBook(result ?? null) })
+    loadBook(id)
       .catch(() => { if (active) setError("This PDF could not be loaded from your library.") })
       .finally(() => { if (active) setLoading(false) })
     function loadAnnotations() {
       try {
         const saved: unknown = JSON.parse(localStorage.getItem(`prism-annotations:${id}`) ?? "[]")
-        if (Array.isArray(saved)) setSavedAnnotations(saved as ReaderAnnotation[])
-        const hidden: unknown = JSON.parse(localStorage.getItem(`prism-hidden-demo-annotations:${id}`) ?? "[]")
-        if (Array.isArray(hidden)) setHiddenDemoIds(hidden as string[])
+        if (Array.isArray(saved)) {
+          const realAnnotations = (saved as ReaderAnnotation[]).filter((annotation) => !annotation.id?.startsWith("demo-columbian-") && !("demo" in annotation && annotation.demo))
+          if (realAnnotations.length !== saved.length) localStorage.setItem(`prism-annotations:${id}`, JSON.stringify(realAnnotations))
+          setSavedAnnotations(realAnnotations)
+        }
       } catch {
         setError("Your annotations could not be loaded.")
       }
@@ -59,39 +60,28 @@ export default function BookPage() {
       window.removeEventListener("focus", loadAnnotations)
       window.removeEventListener("storage", loadAnnotations)
     }
-  }, [id])
+  }, [id, loadBook])
 
   function readPdf() {
     if (!book) return
     router.push(`/books/${encodeURIComponent(book.id)}/read`)
   }
 
-  function downloadPdf() {
-    if (!book) return
-    const url = URL.createObjectURL(book.file)
-    const anchor = document.createElement("a")
-    anchor.href = url
-    anchor.download = book.name
-    anchor.click()
-    window.setTimeout(() => URL.revokeObjectURL(url), 60000)
-  }
-
   function deleteAnnotation(annotation: ReaderAnnotation) {
     try {
-      if (annotation.id.startsWith("demo-columbian-")) {
-        const next = [...hiddenDemoIds, annotation.id]
-        localStorage.setItem(`prism-hidden-demo-annotations:${id}`, JSON.stringify(next))
-        setHiddenDemoIds(next)
-      } else {
-        const next = savedAnnotations.filter((item) => item.id !== annotation.id)
-        localStorage.setItem(`prism-annotations:${id}`, JSON.stringify(next))
-        setSavedAnnotations(next)
-      }
+      const next = savedAnnotations.filter((item) => item.id !== annotation.id)
+      localStorage.setItem(`prism-annotations:${id}`, JSON.stringify(next))
+      setSavedAnnotations(next)
     } catch { setError("This annotation could not be deleted.") }
   }
 
   const annotations = savedAnnotations
   const visibleAnnotations = annotations.filter((item) => filter === "all" || item.kind === filter)
+  const heroTitleSize = (book?.title.length ?? 0) > 72
+    ? "line-clamp-4 text-[clamp(2.5rem,3.5vw,4rem)] leading-[1.08] tracking-[-.05em]"
+    : (book?.title.length ?? 0) > 42
+      ? "line-clamp-4 text-[clamp(2.75rem,4.5vw,5rem)] leading-[1.05] tracking-[-.055em]"
+      : "max-w-[14ch] text-[clamp(3.25rem,6vw,6.5rem)] leading-[1.02] tracking-[-.065em]"
 
   return <main className="min-h-screen bg-background text-foreground">
     <div className="mx-auto max-w-[1440px] px-5 sm:px-8 lg:px-12">
@@ -117,12 +107,9 @@ export default function BookPage() {
         <section className="grid items-start gap-12 py-10 sm:py-14 lg:grid-cols-[minmax(0,1fr)_minmax(300px,420px)] lg:gap-24" aria-labelledby="book-title">
           <div className="max-w-2xl lg:pt-9">
             <p className="mb-6 text-xs font-medium uppercase tracking-[.2em] text-muted-foreground">Your library / PDF</p>
-            <h1 id="book-title" className="max-w-[14ch] break-words font-heading text-[clamp(3.25rem,6vw,6.5rem)] font-medium leading-[1.02] tracking-[-.065em]">{book.title}</h1>
+            <h1 id="book-title" className={`max-w-full break-words font-heading font-medium ${heroTitleSize}`}>{book.title}</h1>
             <p className="mt-7 text-base text-muted-foreground">A place to read, revisit, and make this book your own.</p>
-            <div className="mt-10 flex flex-wrap items-center gap-3">
-              <Button size="lg" onClick={readPdf} className="h-12 gap-2 rounded-full bg-foreground px-7 text-background hover:bg-foreground/85"><RiBookOpenLine className="size-5" /> Read PDF</Button>
-              <Button size="lg" variant="ghost" onClick={downloadPdf} className="h-12 gap-2 px-5"><RiDownloadLine className="size-5" /> Download</Button>
-            </div>
+            <div className="mt-10"><Button size="lg" onClick={readPdf} className="h-12 gap-2 rounded-full bg-foreground px-7 text-background hover:bg-foreground/85"><RiBookOpenLine className="size-5" /> Read PDF</Button></div>
             <p className="mt-8 text-sm text-muted-foreground">{formatSize(book.size)} <span className="mx-2">·</span> Added {new Date(book.addedAt).toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" })}</p>
           </div>
           <div className="group mx-auto w-full max-w-[420px] lg:mx-0"><BookCover pdf={book} /></div>
@@ -156,9 +143,13 @@ export default function BookPage() {
             {visibleAnnotations.map((annotation) => <article key={annotation.id} className="flex gap-5 py-6">
               <AnnotationTypeIcon kind={annotation.kind} className="mt-1 size-5 shrink-0 text-muted-foreground" />
               <div className="min-w-0 flex-1">
-                <p className="text-xs font-medium uppercase tracking-[.15em] text-muted-foreground">{categories.find((category) => category.value === annotation.kind)?.label} · Page {annotation.page}{annotation.demo ? " · Demo" : ""}</p>
+                <p className="text-xs font-medium uppercase tracking-[.15em] text-muted-foreground">{categories.find((category) => category.value === annotation.kind)?.label} · Page {annotation.page}</p>
                 <h3 className="mt-2 text-lg font-medium">{annotation.title}</h3>
-                <p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-muted-foreground">{annotation.text}</p>
+                {annotation.kind !== "pronunciation" && (annotation.text || annotation.quote) && <p className="mt-2 line-clamp-3 whitespace-pre-wrap text-sm leading-7 text-muted-foreground" dir="auto">{annotation.text || annotation.quote}</p>}
+                <Button variant="outline" size="sm" nativeButton={false} render={<Link href={`/books/${encodeURIComponent(id)}/read?annotation=${encodeURIComponent(annotation.id)}`} />} className="mt-3">
+                  {annotation.kind === "video" ? "Open video" : annotation.kind === "pronunciation" ? "Open pronunciation" : "View in reader"}
+                  <RiArrowRightLine className="size-4" />
+                </Button>
               </div>
               <Button variant="ghost" size="icon-sm" aria-label={`Delete ${annotation.title}`} title="Delete annotation" className="shrink-0 text-muted-foreground hover:text-destructive" onClick={() => deleteAnnotation(annotation)}><RiDeleteBin6Line className="size-4" /></Button>
             </article>)}
