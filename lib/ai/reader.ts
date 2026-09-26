@@ -1,7 +1,8 @@
-import type { ReaderInput, ReaderQuiz, ReaderResponse, VideoPlan, VideoScene, VideoVisual } from "../reader-types"
+import type { ReaderInput, ReaderQuiz, ReaderResponse, VideoPlan, VideoScene } from "../reader-types"
 import { isReadingProficiency } from "../reader-preferences"
 import { AiError } from "./http"
 import { generateContent } from "./gemini"
+import { normalizeVideoVisual } from "./video-animation"
 
 const actions = ["ask", "adapt", "explain", "quiz", "translate", "pronunciation", "video"]
 const isObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value)
@@ -32,16 +33,19 @@ const quizSchema = { type: "OBJECT", required: ["title", "answer", "questions"],
   } } },
 } }
 const speechSchema = { type: "OBJECT", required: ["title", "answer", "speechText"], properties: { title: s, answer: s, speechText: s } }
-// Keep the provider schema small; validate scene counts and visual constraints below.
+const pointSchema = { type: "OBJECT", required: ["x", "y"], properties: { x: { type: "NUMBER" }, y: { type: "NUMBER" } } }
+const animationObjectSchema = { type: "OBJECT", required: ["id", "kind", "text", "x", "y", "width", "height", "color", "points", "values", "columns"], properties: {
+  id: s, kind: s, text: s, x: { type: "NUMBER" }, y: { type: "NUMBER" }, width: { type: "NUMBER" }, height: { type: "NUMBER" }, color: s,
+  points: { type: "ARRAY", items: pointSchema }, values: { type: "ARRAY", items: { type: "NUMBER" } }, columns: { type: "INTEGER" },
+} }
 const videoSchema = { type: "OBJECT", required: ["title", "summary", "scenes"], properties: {
   title: s, summary: s,
   scenes: { type: "ARRAY", items: { type: "OBJECT", required: ["heading", "caption", "narration", "visual"], properties: {
     heading: s, caption: s, narration: s,
-    visual: { type: "OBJECT", required: ["type", "labels", "values", "points"], properties: {
-      type: s,
-      labels: { type: "ARRAY", items: s },
-      values: { type: "ARRAY", items: { type: "NUMBER" } },
-      points: { type: "ARRAY", items: { type: "OBJECT", properties: { x: { type: "NUMBER" }, y: { type: "NUMBER" } } } },
+    visual: { type: "OBJECT", required: ["type", "labels", "values", "points", "illustrative", "frames"], properties: {
+      type: s, illustrative: { type: "BOOLEAN" },
+      labels: { type: "ARRAY", items: s }, values: { type: "ARRAY", items: { type: "NUMBER" } }, points: { type: "ARRAY", items: pointSchema },
+      frames: { type: "ARRAY", items: { type: "OBJECT", required: ["at", "objects"], properties: { at: { type: "NUMBER" }, objects: { type: "ARRAY", items: animationObjectSchema } } } },
     } },
   } } },
 } }
@@ -94,34 +98,19 @@ export async function generateVideoPlan(input: ReaderInput): Promise<VideoPlan> 
   const detailed = input.detailed !== false
   const minimum = detailed ? 6 : 3
   const maximum = detailed ? 8 : 4
-  const evidence = [input.selection ?? "", ...(input.documentPassages ?? []).map((passage) => passage.text)].join("\n")
-  const sourceNumbers = new Set(evidence.match(/(?<![\d.])-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![\d.])/g)?.map((value) => Number(value.replaceAll(",", ""))) ?? [])
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const data = parseJson(await generateContent(input, `Create a ${minimum}-${maximum} scene narrated visual lesson centered on the reviewed selection, using relevant documentPassages from the same PDF for broader context. Follow the reader's topic and instructions. Cite the page number in narration or caption when using a fact found only in documentPassages. Write narration in targetLanguage (English when unspecified or auto). ${detailed ? "Make a detailed 2-4 minute lesson: introduce the question, unpack the key definitions, develop the reasoning in small steps, show a worked example or useful analogy, explain a subtle point or common misconception, connect the ideas, and finish with a recap. Cover the important details of this specific passage, not just its general subject. Use 40-70 words of narration per scene." : "Make a concise lesson with 20-40 words of narration per scene."} Use mathematical animation: dark backgrounds, color-coded geometry, transformations, and step-by-step visual reasoning. Every scene needs a heading (max 75 characters), a caption (max 180 characters), and narration (max 1000 characters). Visuals support: flow (2-4 ordered labels connected by arrows), comparison (2-4 labeled concepts), bars (2-4 labels plus matching positive numeric values), graph (two axis labels plus 3-20 ordered x/y points), numberline (2-4 labels with matching numeric values), triangle (right triangle with squares on the sides; labels a, b, c and exactly the two positive leg lengths in values), equation (2-4 equation steps as Unicode text in labels, no LaTeX). Prefer triangle and transforming equations for geometry. Vary the visuals to actually teach the concept. Every visual must include labels, values, and points; use empty arrays for irrelevant fields. Labels max 60 characters. Source facts must be faithful. Every numeric value in a bar chart, graph, number line, or triangle must appear explicitly in selectedContent or documentPassages. If neither source has relevant numbers, use qualitative flow, comparison, or equation visuals instead. Never invent numbers, even for an illustrative example. Explain the visual in the narration instead of merely reading its labels. Keep terminology, names, and quantities from the selection accurate. No Python code or executable expressions: your storyboard will be compiled into Manim code. ${attempt ? "The previous storyboard contained chart values absent from selectedContent and documentPassages. Replace all unsupported numeric visuals with qualitative ones." : ""}`, videoSchema))
-    if (!Array.isArray(data.scenes) || data.scenes.length < minimum || data.scenes.length > maximum) throw new AiError("The AI returned an incomplete storyboard. Try again.")
-    const scenes: VideoScene[] = data.scenes.map((raw) => {
-      if (!isObject(raw) || !isObject(raw.visual)) throw new AiError("The AI returned an invalid scene.")
-      const visual = raw.visual
-      if (!["flow", "graph", "bars", "comparison", "numberline", "triangle", "equation"].includes(visual.type as string) || !Array.isArray(visual.labels) || visual.labels.length < 2 || visual.labels.length > 4 || !Array.isArray(visual.values) || visual.values.length > 4 || !Array.isArray(visual.points) || visual.points.length > 20) throw new AiError("The AI returned an unsupported visual.")
-      const labels = visual.labels.map((label) => text(label, 60, "visual label"))
-      const values = visual.values as number[]
-      if (values.some((value) => typeof value !== "number" || !Number.isFinite(value) || Math.abs(value) > 1e6)) throw new AiError("The AI returned invalid visual values.")
-      const points = visual.points.map((point) => {
-        if (!isObject(point) || typeof point.x !== "number" || typeof point.y !== "number" || !Number.isFinite(point.x) || !Number.isFinite(point.y) || Math.abs(point.x) > 1e6 || Math.abs(point.y) > 1e6) throw new AiError("The AI returned invalid graph points.")
-        return { x: point.x, y: point.y }
-      })
-      if (visual.type === "graph" && (points.length < 3 || new Set(points.map((point) => point.x)).size < 2)) throw new AiError("The AI returned an empty graph.")
-      if (["bars", "numberline"].includes(visual.type as string) && (values.length !== labels.length || (visual.type === "bars" && values.some((value) => value <= 0)))) throw new AiError("The AI returned mismatched visual labels and values.")
-      if (visual.type === "triangle" && (values.length !== 2 || values.some((value) => value <= 0))) throw new AiError("The AI returned invalid triangle dimensions.")
-      return { heading: text(raw.heading, 100, "scene heading"), caption: text(raw.caption, 220, "caption"), narration: text(raw.narration, 1000, "narration"), visual: { type: visual.type as VideoVisual["type"], labels, values, points } }
-    })
-    const ungroundedNumber = scenes.some((scene) => {
-      const { type, values, points } = scene.visual
-      const numbers = type === "graph" ? points.flatMap((point) => [point.x, point.y]) : ["bars", "numberline", "triangle"].includes(type) ? values : []
-      return numbers.some((value) => !sourceNumbers.has(value))
-    })
-    if (ungroundedNumber) continue
-    return { title: text(data.title, 100, "video title"), summary: text(data.summary, 1200, "video summary"), language: input.language || "English", scenes }
-  }
-  throw new AiError("The storyboard included chart numbers absent from the reviewed selection and retrieved document passages. Try a smaller selection or remove numeric charts from the instructions.")
+  const data = parseJson(await generateContent(input, `Create a ${minimum}-${maximum} scene narrated visual lesson. Read the image directly, identify its subject, and choose diagrams that explain it. Center the lesson on the selected image/text; cite page numbers for facts used only from documentPassages. Follow the reader's preferences and targetLanguage. ${detailed ? "Use 40–70 words of narration per scene, developing definitions, mechanisms, a worked demonstration, and a recap." : "Use 20–40 words per scene with a compact worked demonstration."}
+Choose visuals that teach THIS subject. Do not substitute generic flowcharts or concept cards for a process, formula, chart, image, geometry, or physical mechanism. Prefer custom animation where useful. For mathematical subjects, include typeset formulas connected to diagrams and show how inputs affect results. Use flow/comparison when relationships are the learning goal.
+Every scene: heading <=75 characters, caption <=180, narration <=1000. Every visual: type, labels, values, points, illustrative boolean, frames (empty for fixed templates). Numeric evidence may come from the image, selectedContent, or documentPassages. Illustrative synthetic examples and standard mathematical curves ARE allowed: set illustrative=true and explicitly call them schematic/illustrative in narration. Never imply illustrative values are measured source data. Standard explanatory formulas absent from the source must be introduced as explanatory background, with all symbols defined. Preserve source facts; say when illegible.
+Custom type animation uses 2–4 compact keyframes. at is a fraction of chapter duration: first 0, subsequent strictly increasing through max 0.85. Prefer 3–6 objects per frame and small grids (3–6 rows/columns) to keep the lesson compact. Each frame may have up to 24 objects. Same id and kind across frames means that object smoothly transforms; missing IDs fade out and new IDs fade in. Prefer showing a formula together with its diagram, using matching symbols and colors. Animation must show actual changing geometry, curves, values, positions or formulas, not just reveal labels. Objects have id (ASCII name), kind (text/formula/rectangle/circle/line/arrow/curve/grid/surface), text (max400), x,y (center), width,height, color (#RRGGBB), points, values, columns. Every object includes every field; unused text="", points=[], values=[], columns=0. Canvas x=-5.8..5.8 and y=-1.95..1.05. Keep bounding boxes inside that canvas without overlap; width 0.1..11.6, height 0.1..2.9. Reserve space for clear labels and use a consistent palette: #6ADFD4, #F6C977, #B9A5F7, #F49A8A, #F7F7F5. Pair formula on one side with diagram on the other when useful.
+formula text is Matplotlib Mathtext LaTeX notation WITHOUT dollar delimiters, supports \\frac, \\sum, \\exp, \\sigma, subscripts/superscripts; no packages, environments, or arbitrary TeX commands. Use typeset fractions/sums rather than "sum(...)" strings. text objects use natural-language labels. rectangle/circle use dimensions. line/arrow have exactly two local x/y points. curve has 2–120 local x/y sample points; these points are fitted to width,height (shape remains proportional) and centered at x,y; draw axes and labels separately. grid/surface have row-major intensity values 0..1, columns=2..12, 2..12 rows. grid renders colored cells; surface renders an oblique height mesh where intensity is height. Keep the same grid dimensions across frames for smooth before/after animation. Multiple surfaces/curves can demonstrate input, kernels, product and output, with matching colored formula terms. Arrays are bounded to 144 values. Numeric examples must be mathematically consistent; compute samples from the described formula, not arbitrary decorative points.
+Fixed templates: flow/comparison 2–4 labels; bars 2–4 labels and matching positive values; graph two axis labels and 3–20 x/y points; numberline 2–4 labels and matching values; triangle labels a,b,c and two positive legs; equation 2–4 Unicode expression labels (custom animation formula preferred). Fixed labels <=60 characters. Use no executable code or expressions for numeric geometry. `, videoSchema))
+  if (!Array.isArray(data.scenes) || !data.scenes.length) throw new AiError("The AI returned an empty storyboard. Try again.")
+  const scenes: VideoScene[] = data.scenes.slice(0, maximum).filter(isObject).map((raw, index) => ({
+    heading: typeof raw.heading === "string" && raw.heading.trim() ? raw.heading.slice(0, 100) : `Scene ${index + 1}`,
+    caption: typeof raw.caption === "string" ? raw.caption.slice(0, 220) : "",
+    narration: typeof raw.narration === "string" ? raw.narration.slice(0, 1000) : "",
+    visual: normalizeVideoVisual(raw.visual, typeof raw.heading === "string" ? raw.heading : "Key idea"),
+  }))
+  if (!scenes.length) throw new AiError("The AI returned an empty storyboard. Try again.")
+  return { title: typeof data.title === "string" && data.title.trim() ? data.title.slice(0, 100) : "Visual lesson", summary: typeof data.summary === "string" ? data.summary.slice(0, 1200) : scenes[0].caption, language: input.language || "English", scenes }
 }

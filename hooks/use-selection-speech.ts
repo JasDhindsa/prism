@@ -28,6 +28,9 @@ export function useSelectionSpeech() {
   const context = useRef<AudioContext | null>(null)
   const buffer = useRef<AudioBuffer | null>(null)
   const source = useRef<AudioBufferSourceNode | null>(null)
+  const queued = useRef<AudioBufferSourceNode[]>([])
+  const nextTime = useRef(0)
+  const streaming = useRef(false)
   const controller = useRef<AbortController | null>(null)
   const offset = useRef(0)
   const started = useRef(0)
@@ -37,10 +40,12 @@ export function useSelectionSpeech() {
   function transition(value: SelectionSpeechPhase) { phaseRef.current = value; if (mounted.current) setPhase(value) }
   function stopSource() {
     playbackVersion.current++; cancelAnimationFrame(frame.current)
+    for (const node of queued.current) { node.onended = null; try { node.stop() } catch { /* Already ended. */ } node.disconnect() }
+    queued.current = []
     if (source.current) { source.current.onended = null; try { source.current.stop() } catch { /* Already ended. */ } source.current.disconnect(); source.current = null }
   }
   function release() {
-    controller.current?.abort(); stopSource(); buffer.current = null
+    controller.current?.abort(); streaming.current = false; stopSource(); buffer.current = null
     void context.current?.close().catch(() => undefined); context.current = null
   }
   function close() { release(); transition("idle"); if (mounted.current) setOpen(false) }
@@ -76,16 +81,14 @@ export function useSelectionSpeech() {
       const node = ctx.createBufferSource(); node.buffer = audio; node.connect(ctx.destination)
       source.current = node; started.current = ctx.currentTime
       transition("playing"); setError("")
-      node.onended = () => {
-        if (version !== playbackVersion.current) return
-        cancelAnimationFrame(frame.current); node.disconnect(); source.current = null
-        offset.current = audio.duration; setPosition(audio.duration); transition("ended")
-      }
+      nextTime.current = ctx.currentTime + Math.max(0, audio.duration - offset.current)
+      queued.current = [node]
+      attachEnd(node, version)
       node.start(0, offset.current)
       let lastUpdate = 0
       function tick(now: number) {
         if (version !== playbackVersion.current || phaseRef.current !== "playing") return
-        if (now - lastUpdate > 100) { setPosition(Math.min(audio!.duration, offset.current + ctx!.currentTime - started.current)); lastUpdate = now }
+        if (now - lastUpdate > 100) { setPosition(Math.min(buffer.current?.duration || audio!.duration, offset.current + ctx!.currentTime - started.current)); lastUpdate = now }
         frame.current = requestAnimationFrame(tick)
       }
       frame.current = requestAnimationFrame(tick)
@@ -93,44 +96,84 @@ export function useSelectionSpeech() {
       if (version === playbackVersion.current) { transition("paused"); setError("Press play to enable audio playback.") }
     }
   }
+  function attachEnd(node: AudioBufferSourceNode, version: number) {
+    node.onended = () => {
+      node.disconnect()
+      if (version !== playbackVersion.current) return
+      queued.current = queued.current.filter((item) => item !== node)
+      source.current = queued.current[queued.current.length - 1] || null
+      if (source.current) return
+      cancelAnimationFrame(frame.current)
+      offset.current = buffer.current?.duration || 0; setPosition(offset.current)
+      transition(streaming.current ? "preparing" : "ended")
+    }
+  }
+  function queueAudio(audio: AudioBuffer) {
+    const ctx = context.current
+    if (!ctx) return
+    const node = ctx.createBufferSource(); node.buffer = audio; node.connect(ctx.destination)
+    queued.current.push(node); source.current = node
+    attachEnd(node, playbackVersion.current)
+    const time = Math.max(ctx.currentTime, nextTime.current)
+    node.start(time); nextTime.current = time + audio.duration
+  }
   async function play(text: string, language: string | undefined, signal: AbortSignal) {
     const ctx = context.current
     if (signal.aborted || !ctx) return
     transition("preparing")
     try {
       if (!text.trim()) throw new Error("There is no text to pronounce. Select a readable passage first.")
+      streaming.current = true
       const decoded: AudioBuffer[] = []
+      let carry: number | undefined
       for (const chunk of speechChunks(text)) {
-        const response = await fetch("/api/speech", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: chunk, language }), signal })
+        const response = await fetch("/api/speech", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: chunk, language, stream: true }), signal })
         if (!response.ok) { const result = await response.json(); throw new Error(result.error || "Speech could not be generated.") }
-        const bytes = await response.arrayBuffer()
-        if (signal.aborted) return
-        decoded.push(await ctx.decodeAudioData(bytes))
+        if (!response.body) throw new Error("Speech streaming is unavailable.")
+        const reader = response.body.getReader()
+        try {
+          while (!signal.aborted) {
+            const { value, done } = await reader.read()
+            if (signal.aborted) return
+            if (done) break
+            const bytes = carry === undefined ? value : new Uint8Array([carry, ...value])
+            const sampleCount = Math.floor(bytes.length / 2)
+            carry = bytes.length % 2 ? bytes[bytes.length - 1] : undefined
+            if (!sampleCount) continue
+            const audio = ctx.createBuffer(1, sampleCount, 24000)
+            const samples = audio.getChannelData(0)
+            const view = new DataView(bytes.buffer, bytes.byteOffset, sampleCount * 2)
+            for (let index = 0; index < sampleCount; index++) samples[index] = view.getInt16(index * 2, true) / 32768
+            decoded.push(audio)
+            // Keep received audio for pause, seeking, and replay while new chunks play.
+            const length = decoded.reduce((sum, item) => sum + item.length, 0)
+            const combined = ctx.createBuffer(1, length, 24000)
+            let at = 0
+            for (const item of decoded) { combined.getChannelData(0).set(item.getChannelData(0), at); at += item.length }
+            buffer.current = combined
+            setDuration(combined.duration)
+            const values = combined.getChannelData(0)
+            const peaks = Array.from({ length: 96 }, (_, index) => {
+              const first = Math.floor(index * length / 96), end = Math.floor((index + 1) * length / 96)
+              let peak = 0
+              for (let sample = first; sample < end; sample += Math.max(1, Math.floor((end - first) / 160))) peak = Math.max(peak, Math.abs(values[sample]))
+              return peak
+            })
+            const maximum = Math.max(.001, ...peaks)
+            setData(peaks.map((peak) => Math.max(.03, peak / maximum)))
+            if (phaseRef.current !== "paused") {
+              if (!source.current) await startAt(offset.current)
+              else queueAudio(audio)
+            }
+          }
+        } finally { await reader.cancel().catch(() => undefined) }
+        if (carry !== undefined) throw new Error("The speech stream ended with incomplete audio.")
       }
-      if (signal.aborted || !decoded.length) return
-      const length = decoded.reduce((sum, item) => sum + item.length, 0)
-      const combined = ctx.createBuffer(1, length, ctx.sampleRate)
-      const values = combined.getChannelData(0)
-      let at = 0
-      for (const item of decoded) {
-        for (let channel = 0; channel < item.numberOfChannels; channel++) {
-          const samples = item.getChannelData(channel)
-          for (let index = 0; index < samples.length; index++) values[at + index] += samples[index] / item.numberOfChannels
-        }
-        at += item.length
-      }
-      const peaks = Array.from({ length: 96 }, (_, index) => {
-        const first = Math.floor(index * length / 96), end = Math.floor((index + 1) * length / 96)
-        let peak = 0
-        for (let sample = first; sample < end; sample += Math.max(1, Math.floor((end - first) / 160))) peak = Math.max(peak, Math.abs(values[sample]))
-        return peak
-      })
-      const maximum = Math.max(.001, ...peaks)
-      buffer.current = combined; setData(peaks.map((peak) => Math.max(.03, peak / maximum)))
-      setDuration(combined.duration); setPosition(0)
-      await startAt(0)
+      streaming.current = false
+      if (!decoded.length) throw new Error("ElevenLabs returned no audio.")
+      if (!source.current && phaseRef.current !== "paused") transition("ended")
     } catch (caught) {
-      if (!signal.aborted) { setError(caught instanceof Error ? caught.message : "Speech could not be played."); transition("error") }
+      if (!signal.aborted) { streaming.current = false; stopSource(); setError(caught instanceof Error ? caught.message : "Speech could not be played."); transition("error") }
     }
   }
   function toggle() {

@@ -3,6 +3,9 @@ from manim import *
 from pathlib import Path
 import json
 import textwrap
+import hashlib
+import xml.etree.ElementTree as ET
+from matplotlib.mathtext import math_to_image
 
 PLAN = json.loads(__PRISM_STORYBOARD__)
 TIMINGS = json.loads(__PRISM_TIMINGS__)
@@ -48,8 +51,14 @@ class PrismLesson(Scene):
             count = label(f'{index + 1:02} / {len(PLAN["scenes"]):02}', 17, 1.5, MUTED).to_corner(UR, buff=0.55)
             self.play(FadeIn(progress), FadeIn(heading, shift=UP * 0.12), FadeIn(kicker), FadeIn(count), run_time=0.5)
             visual = scene["visual"]
-            getattr(self, "draw_" + visual["type"])(visual)
             self.play(FadeIn(caption_label), FadeIn(caption, shift=UP * 0.08), run_time=0.4)
+            if visual.get("illustrative"):
+                badge = label("ILLUSTRATIVE · NOT SOURCE MEASUREMENTS", 13, 5.5, MUTED).set_y(-2.23)
+                self.add(badge)
+            if visual["type"] == "animation":
+                self.draw_animation(visual, max(3, timing["duration"] - 1.5))
+            else:
+                getattr(self, "draw_" + visual["type"])(visual)
             is_last = index == len(PLAN["scenes"]) - 1
             self.wait(max(0.5, timing["duration"] - (self.time - started) - (0 if is_last else 0.5)))
             if not is_last:
@@ -167,3 +176,96 @@ class PrismLesson(Scene):
             self.play(DrawBorderThenFill(square), FadeIn(title), run_time=0.7)
         self.play(Indicate(squares[0], color=COLORS[0]), Indicate(squares[1], color=COLORS[1]), run_time=0.6)
         self.play(Indicate(squares[2], color=COLORS[2]), run_time=0.6)
+
+    def animation_object(self, item):
+        kind, color = item["kind"], item["color"]
+        width, height = item["width"], item["height"]
+        if kind == "text":
+            obj = label(item["text"], 26, width, color, 50, height)
+        elif kind == "formula":
+            # Mathtext parses a limited mathematical language; it never invokes TeX.
+            digest = hashlib.sha256(("transparent-v2:" + item["text"]).encode()).hexdigest()
+            directory = Path(__file__).parent / "formula-assets"
+            directory.mkdir(exist_ok=True)
+            file = directory / (digest + ".svg")
+            try:
+                if not file.exists():
+                    math_to_image("$" + item["text"].strip("$") + "$", file, format="svg", color="white", dpi=160)
+                    # Matplotlib adds an opaque figure background; remove it before importing paths.
+                    tree = ET.parse(file)
+                    for parent in tree.iter():
+                        for child in list(parent):
+                            if child.attrib.get("id") == "patch_1":
+                                parent.remove(child)
+                    tree.write(file, encoding="unicode")
+                obj = SVGMobject(str(file)).set_color(color)
+                obj.scale(min(width / max(obj.width, 0.01), height / max(obj.height, 0.01)))
+            except (ValueError, RuntimeError):
+                # Unsupported math notation should not discard an otherwise useful lesson.
+                obj = label(item["text"], 26, width, color, 60, height)
+        elif kind == "rectangle":
+            obj = Rectangle(width=width, height=height, color=color, fill_opacity=0.15)
+        elif kind == "circle":
+            obj = Circle(radius=0.5, color=color, fill_opacity=0.2).stretch_to_fit_width(width).stretch_to_fit_height(height)
+        elif kind in ("line", "arrow", "curve"):
+            coords = [np.array([p["x"], p["y"], 0.]) for p in item["points"]]
+            if kind == "curve":
+                obj = VMobject(color=color, stroke_width=3).set_points_as_corners(coords)
+            elif kind == "arrow":
+                obj = Arrow(coords[0], coords[1], buff=0, color=color, stroke_width=2.5)
+            else:
+                obj = Line(coords[0], coords[1], color=color, stroke_width=2)
+            # Preserve slopes and relative geometry, including horizontal/vertical lines.
+            factor = min(width / max(obj.width, 0.01), height / max(obj.height, 0.01))
+            obj.scale(factor)
+        else:
+            values, cols = item["values"], item["columns"]
+            rows = len(values) // cols
+            obj = VGroup()
+            if kind == "grid":
+                for row in range(rows):
+                    for col in range(cols):
+                        value = values[row * cols + col]
+                        cell = Rectangle(width=width / cols, height=height / rows, stroke_width=0.6, stroke_color=BACKGROUND,
+                                         fill_color=interpolate_color(ManimColor(SURFACE), ManimColor(color), value), fill_opacity=1)
+                        cell.move_to([(col + 0.5) * width / cols, -(row + 0.5) * height / rows, 0])
+                        obj.add(cell)
+            else:
+                # Project data onto an oblique surface while the lesson chrome stays flat.
+                def project(row, col):
+                    value = values[row * cols + col]
+                    u, v = col / (cols - 1), row / (rows - 1)
+                    return np.array([(u - v) * width * 0.5, (u + v) * height * 0.22 + value * height * 0.55, 0.])
+                for row in reversed(range(rows - 1)):
+                    for col in range(cols - 1):
+                        avg = sum(values[r * cols + c] for r, c in [(row, col), (row, col + 1), (row + 1, col + 1), (row + 1, col)]) / 4
+                        patch = Polygon(project(row, col), project(row, col + 1), project(row + 1, col + 1), project(row + 1, col),
+                                        fill_color=interpolate_color(ManimColor(SURFACE), ManimColor(color), avg), fill_opacity=0.95,
+                                        stroke_color=color, stroke_width=0.65)
+                        obj.add(patch)
+            obj.move_to(ORIGIN)
+        return obj.move_to([item["x"], item["y"], 0])
+
+    def draw_animation(self, visual, duration):
+        current = {}
+        started = self.time
+        for index, frame in enumerate(visual["frames"]):
+            target_time = frame["at"] * duration
+            # End each transition at its planned narration position.
+            transition = min(1.2, max(0.35, target_time - (self.time - started))) if index else 0.6
+            wait = target_time - (self.time - started) - transition
+            if wait > 0:
+                self.wait(wait)
+            replacements = {item["id"]: self.animation_object(item) for item in frame["objects"]}
+            changes = []
+            for key, obj in current.items():
+                if key not in replacements:
+                    changes.append(FadeOut(obj))
+            for key, obj in replacements.items():
+                if key in current:
+                    changes.append(Transform(current[key], obj))
+                else:
+                    changes.append(FadeIn(obj))
+            self.play(*changes, run_time=transition)
+            current = {key: current[key] if key in current else obj for key, obj in replacements.items()}
+        self.wait(max(0, duration - (self.time - started)))

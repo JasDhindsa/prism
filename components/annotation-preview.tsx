@@ -28,6 +28,7 @@ const descriptions: Record<Action, { title: string; about: string; instructions:
 
 export function AnnotationPreview({ action, image, initialText, defaultLanguage, defaultProficiency, onClose, onSubmit }: { action: Action; image?: string; initialText: string; defaultLanguage: string; defaultProficiency: ReadingProficiency; onClose: () => void; onSubmit: (draft: AnnotationDraft) => void }) {
   const description = descriptions[action]
+  const directImage = action === "video" && !!image
   const [text, setText] = useState(image ? "" : initialText)
   const [topic, setTopic] = useState("")
   const [instructions, setInstructions] = useState(description.instructions)
@@ -36,13 +37,13 @@ export function AnnotationPreview({ action, image, initialText, defaultLanguage,
   const [detailed, setDetailed] = useState(true)
   const [progress, setProgress] = useState(0)
   const [status, setStatus] = useState(image ? "Reading the selected area…" : "Ready to review")
-  const [reading, setReading] = useState(!!image)
+  const [reading, setReading] = useState(!!image && action !== "video")
   const [error, setError] = useState("")
   const [attempt, setAttempt] = useState(0)
   const dirty = useRef(false)
   useEffect(() => {
     const sourceImage = image
-    if (!sourceImage) return
+    if (!sourceImage || action === "video") return
     let active = true
     let worker: Worker | undefined
     async function extract(source: string) {
@@ -64,15 +65,15 @@ export function AnnotationPreview({ action, image, initialText, defaultLanguage,
     }
     void extract(sourceImage)
     return () => { active = false; void worker?.terminate().catch(() => undefined) }
-  }, [image, ocrLanguage, attempt])
+  }, [image, ocrLanguage, attempt, action])
 
   function retry() { dirty.current = false; setAttempt((value) => value + 1) }
   return <Dialog open onOpenChange={(open) => { if (!open) onClose() }}><DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-4xl">
-    <DialogHeader><DialogTitle>{description.title}</DialogTitle><DialogDescription>{description.about} Review and edit it before submitting.</DialogDescription><p className="text-xs text-muted-foreground">AI output: {language} · Depth: {proficiencyLevels.find((level) => level.value === defaultProficiency)?.label}</p></DialogHeader>
-    <form onSubmit={(event) => { event.preventDefault(); if (text.trim() && !reading) onSubmit({ text: text.trim(), topic: topic.trim(), instructions: instructions.trim(), language, detailed }) }} className="grid gap-6">
+    <DialogHeader><DialogTitle>{description.title}</DialogTitle><DialogDescription>{description.about} {directImage ? "The model will read your selected image directly." : "Review and edit it before submitting."}</DialogDescription><p className="text-xs text-muted-foreground">AI output: {language} · Depth: {proficiencyLevels.find((level) => level.value === defaultProficiency)?.label}</p></DialogHeader>
+    <form onSubmit={(event) => { event.preventDefault(); if ((directImage || text.trim()) && !reading) onSubmit({ text: text.trim(), topic: topic.trim(), instructions: instructions.trim(), language, detailed }) }} className="grid gap-6">
       <div className={image ? "grid gap-4 md:grid-cols-2" : "grid gap-4"}>
         {image && <div className="flex min-h-40 items-center justify-center overflow-hidden rounded-2xl border p-4"><img src={image} alt="The selected area of your PDF" className="max-h-64 max-w-full object-contain" /></div>}
-        <Field className="min-w-0">
+        {!directImage && <Field className="min-w-0">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <FieldLabel htmlFor="ocr-source">Selected content · editable</FieldLabel>
             {image && <Select value={ocrLanguage} items={languages.map((item) => ({ value: item.ocr, label: item.name }))} onValueChange={(value) => { if (typeof value === "string") { dirty.current = false; setOcrLanguage(value) } }}>
@@ -87,7 +88,7 @@ export function AnnotationPreview({ action, image, initialText, defaultLanguage,
           </div>
           {reading && <Progress value={progress} />}
           {error && <FieldError>{error}</FieldError>}
-        </Field>
+        </Field>}
       </div>
       <Field><FieldLabel htmlFor="annotation-topic">Focus (optional)</FieldLabel><Input id="annotation-topic" value={topic} onChange={(event) => setTopic(event.target.value)} maxLength={200} placeholder="A question or idea to emphasize" /><FieldDescription>Leave blank to cover the full selection.</FieldDescription></Field>
       <Field><FieldLabel htmlFor="annotation-instructions">Your instructions</FieldLabel><Textarea id="annotation-instructions" value={instructions} onChange={(event) => setInstructions(event.target.value)} maxLength={1500} className="min-h-20 resize-y" placeholder="Choose a focus, audience, or level of detail…" /></Field>
@@ -108,7 +109,7 @@ export function AnnotationPreview({ action, image, initialText, defaultLanguage,
         </Field>}
       </div>
       <Separator />
-      <DialogFooter className="items-center sm:justify-between"><p className="text-sm text-muted-foreground">{action === "video" ? "This selection is the focus; relevant passages from this PDF add context." : "Only this reviewed selection will be used as the source."}</p><Button type="submit" disabled={reading || !text.trim()}>Submit &amp; generate<RiArrowRightLine className="size-4" /></Button></DialogFooter>
+      <DialogFooter className="items-center sm:justify-between"><p className="text-sm text-muted-foreground">{action === "video" ? "This selection is the focus; relevant passages from this PDF add context." : "Only this reviewed selection will be used as the source."}</p><Button type="submit" disabled={reading || (!directImage && !text.trim())}>Submit &amp; generate<RiArrowRightLine className="size-4" /></Button></DialogFooter>
     </form>
   </DialogContent></Dialog>
 }

@@ -6,7 +6,21 @@ export type QuizQuestion =
   | { id: string; type: "multiple-choice"; prompt: string; options: { id: string; label: string }[]; answer: string; explanation: string }
   | { id: string; type: "fill-blank"; prompt: string; answer: string; explanation: string }
 export type ReaderQuiz = { questions: QuizQuestion[] }
-export type VideoVisual = { type: "flow" | "graph" | "bars" | "comparison" | "numberline" | "triangle" | "equation"; labels: string[]; values: number[]; points: { x: number; y: number }[] }
+export type VideoAnimationObject = {
+  id: string
+  kind: "text" | "formula" | "rectangle" | "circle" | "line" | "arrow" | "curve" | "grid" | "surface"
+  text: string
+  x: number
+  y: number
+  width: number
+  height: number
+  color: string
+  points: { x: number; y: number }[]
+  values: number[]
+  columns: number
+}
+export type VideoAnimationFrame = { at: number; objects: VideoAnimationObject[] }
+export type VideoVisual = { frames?: VideoAnimationFrame[]; illustrative?: boolean; type: "flow" | "graph" | "bars" | "comparison" | "numberline" | "triangle" | "equation" | "animation"; labels: string[]; values: number[]; points: { x: number; y: number }[] }
 export type VideoScene = { heading: string; caption: string; narration: string; visual: VideoVisual }
 export type VideoPlan = { title: string; summary: string; language?: string; scenes: VideoScene[] }
 export type VideoJob = {
