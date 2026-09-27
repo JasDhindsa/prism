@@ -62,7 +62,7 @@
 .reader-thumb-active .reader-thumb-number { color: var(--foreground); }
 .reader-thumb-number { font-size: 11px; }
 .reader-workspace { position: relative; display: flex; flex: 1; min-width: 0; min-height: 0; flex-direction: column; background: color-mix(in oklch, var(--background), var(--foreground) 6%); }
-.reader-stage { flex: 1; overflow: auto; min-width: 0; min-height: 0; padding: 24px clamp(12px, 3vw, 48px) 72px; scrollbar-color: color-mix(in oklch, var(--border), var(--foreground) 20%) transparent; scrollbar-width: thin; }
+.reader-stage { flex: 1; overflow: auto; scroll-behavior: auto; overscroll-behavior: contain; min-width: 0; min-height: 0; padding: 24px clamp(12px, 3vw, 48px) 72px; scrollbar-color: color-mix(in oklch, var(--border), var(--foreground) 20%) transparent; scrollbar-width: thin; }
 .reader-pages { display: flex; flex-direction: column; align-items: center; gap: 24px; }
 .reader-page-section { width: 100%; min-width: 0; scroll-margin-top: 24px; }
 .reader-page-wrap { display: flex; width: 100%; justify-content: safe center; }
@@ -97,7 +97,7 @@
 .reader-selection-menu button { padding-inline: 8px; font-size: 11px; }
 .reader-area-hint { position: absolute; z-index: 6; bottom: 54px; left: 50%; transform: translateX(-50%); width: max-content; max-width: calc(100% - 24px); border: 1px solid var(--border); border-radius: 999px; padding: 8px 14px; background: var(--background); color: var(--foreground); box-shadow: 0 8px 28px rgba(0,0,0,.2); font-size: 12px; }
 .reader-area-hint span { color: var(--muted-foreground); }
-.reader-page-placeholder { width: min(100%, 820px); min-height: 700px; margin: auto; aspect-ratio: .77; background: color-mix(in oklch, var(--background), var(--foreground) 10%); }
+.reader-page-placeholder { margin: auto; background: color-mix(in oklch, var(--background), var(--foreground) 10%); }
 .reader-page-caption { display: block; margin-top: 9px; color: var(--muted-foreground); font-size: 11px; text-align: center; }
 .reader-page-indicator { position: absolute; z-index: 5; bottom: 15px; left: 50%; transform: translateX(-50%); min-width: 92px; padding: 7px 12px; border: 1px solid var(--border); border-radius: 999px; background: color-mix(in oklch, var(--background), transparent 10%); color: var(--foreground); text-align: center; font-size: 11px; font-weight: 600; backdrop-filter: blur(14px); }
 .reader-page-indicator span { color: var(--muted-foreground); }

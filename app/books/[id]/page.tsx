@@ -14,7 +14,7 @@ import type { AnnotationKind, ReaderAnnotation } from "@/lib/reader-types"
 
 const categories: { value: AnnotationKind; label: string }[] = [
   { value: "quiz", label: "Quiz" },
-  { value: "adaptation", label: "Adaptation" },
+  { value: "adaptation", label: "Explanation" },
   { value: "translation", label: "Translation" },
   { value: "pronunciation", label: "Pronunciation" },
   { value: "highlight", label: "Highlight" },
@@ -144,7 +144,7 @@ export default function BookPage() {
               <AnnotationTypeIcon kind={annotation.kind} className="mt-1 size-5 shrink-0 text-muted-foreground" />
               <div className="min-w-0 flex-1">
                 <p className="text-xs font-medium uppercase tracking-[.15em] text-muted-foreground">{categories.find((category) => category.value === annotation.kind)?.label} · Page {annotation.page}</p>
-                <h3 className="mt-2 text-lg font-medium">{annotation.title}</h3>
+                <h3 className="mt-2 text-lg font-medium">{annotation.kind === "adaptation" ? annotation.title.replace(/^Adapted(?: passage)?/i, "Explanation") : annotation.title}</h3>
                 {annotation.kind !== "pronunciation" && (annotation.text || annotation.quote) && <p className="mt-2 line-clamp-3 whitespace-pre-wrap text-sm leading-7 text-muted-foreground" dir="auto">{annotation.text || annotation.quote}</p>}
                 <Button variant="outline" size="sm" nativeButton={false} render={<Link href={`/books/${encodeURIComponent(id)}/read?annotation=${encodeURIComponent(annotation.id)}`} />} className="mt-3">
                   {annotation.kind === "video" ? "Open video" : annotation.kind === "pronunciation" ? "Open pronunciation" : "View in reader"}
@@ -153,7 +153,7 @@ export default function BookPage() {
               </div>
               <Button variant="ghost" size="icon-sm" aria-label={`Delete ${annotation.title}`} title="Delete annotation" className="shrink-0 text-muted-foreground hover:text-destructive" onClick={() => deleteAnnotation(annotation)}><RiDeleteBin6Line className="size-4" /></Button>
             </article>)}
-          </div> : <p className="py-14 text-sm text-muted-foreground">{filter === "all" ? "No annotations saved for this book yet." : `No ${filter} annotations yet.`}</p>}
+          </div> : <p className="py-14 text-sm text-muted-foreground">{filter === "all" ? "No annotations saved for this book yet." : `No ${categories.find((category) => category.value === filter)?.label.toLowerCase() || filter} annotations yet.`}</p>}
         </section>
 
       </>}

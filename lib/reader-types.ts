@@ -65,6 +65,8 @@ export type ReaderInput = {
   selection?: string
   context?: string
   documentPassages?: { page: number; text: string }[]
+  documentImages?: { page: number; image: string }[]
+  advancedThink?: boolean
   prompt?: string
   image?: string
   language?: string
@@ -74,4 +76,4 @@ export type ReaderInput = {
   mode?: "text" | "voice"
   history?: { role: "user" | "assistant"; text: string }[]
 }
-export type ReaderResponse = { answer: string; title?: string; quiz?: ReaderQuiz; speechText?: string; speechLanguage?: string; video?: VideoJob }
+export type ReaderResponse = { sourcePages?: number[]; answer: string; title?: string; quiz?: ReaderQuiz; speechText?: string; speechLanguage?: string; video?: VideoJob }

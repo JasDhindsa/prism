@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react"
 import type { ReadingProficiency } from "@/lib/reader-preferences"
 import { languages } from "@/lib/languages"
 
-export type VoicePhase = "idle" | "connecting" | "listening" | "transcribing" | "thinking" | "speaking" | "paused"
+export type VoicePhase = "idle" | "connecting" | "listening" | "transcribing" | "thinking" | "speaking" | "muted" | "paused"
 export type VoiceContext = { text: string; image?: string; history: { role: "user" | "assistant"; text: string }[] }
 type Options = {
   language: string
@@ -40,6 +40,10 @@ export function useVoiceConversation(options: Options) {
   const [active, setActive] = useState(false)
   const [phase, setPhase] = useState<VoicePhase>("idle")
   const [error, setError] = useState("")
+  const [microphoneOn, setMicrophoneOn] = useState(false)
+  const listeningWanted = useRef(false)
+  const finishingTurn = useRef(false)
+  const flushTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [inputStream, setInputStream] = useState<MediaStream | null>(null)
   const [outputStream, setOutputStream] = useState<MediaStream | null>(null)
   const optionsRef = useRef(options)
@@ -63,8 +67,8 @@ export function useVoiceConversation(options: Options) {
   const speaking = useRef(false)
   const speechStarted = useRef(0)
   const lastSpeech = useRef(0)
-  const lastActivity = useRef(0)
   const preRoll = useRef<ArrayBuffer[]>([])
+  const lastActivity = useRef(0)
   const timer = useRef<ReturnType<typeof setInterval> | null>(null)
   const setupTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const transcript = useRef({ userId: "", user: "", assistantId: "", assistant: "" })
@@ -84,6 +88,9 @@ export function useVoiceConversation(options: Options) {
     controller.current?.abort(); contextUpdate.current++
     if (timer.current) clearInterval(timer.current)
     if (setupTimer.current) clearTimeout(setupTimer.current)
+    if (flushTimer.current) clearTimeout(flushTimer.current)
+    flushTimer.current = null; finishingTurn.current = false; listeningWanted.current = false
+    if (mounted.current) setMicrophoneOn(false)
     timer.current = null; setupTimer.current = null
     ready.current = false
     if (socket.current) { socket.current.onclose = null; socket.current.onerror = null; socket.current.onmessage = null; socket.current.close(); socket.current = null }
@@ -149,7 +156,7 @@ export function useVoiceConversation(options: Options) {
     nextPlayTime.current = at + buffer.duration
     node.onended = () => {
       playback.current.delete(node); node.disconnect()
-      if (running.current && !playback.current.size && generationDone.current && !speaking.current) transition("listening")
+      if (running.current && !playback.current.size && generationDone.current && !speaking.current) transition(listeningWanted.current ? "listening" : "muted")
     }
     generationDone.current = false
     node.start(at); transition("speaking")
@@ -165,13 +172,44 @@ export function useVoiceConversation(options: Options) {
     turns.push({ role: "user", parts })
     send({ clientContent: { turns, turnComplete: false } })
   }
-  function finishTurn() {
+  function completeTurn() {
+    if (!finishingTurn.current) return
+    finishingTurn.current = false
+    if (flushTimer.current) clearTimeout(flushTimer.current)
+    flushTimer.current = null
     if (!ready.current || !speaking.current) return
     send({ realtimeInput: { activityEnd: {} } })
     speaking.current = false; preRoll.current = []
     transition(playback.current.size ? "speaking" : "thinking")
   }
+  function finishTurn() {
+    listeningWanted.current = false
+    if (mounted.current) setMicrophoneOn(false)
+    stream.current?.getAudioTracks().forEach((track) => { track.enabled = false })
+    if (!ready.current || !speaking.current || finishingTurn.current) {
+      capture.current?.port.postMessage({ recording: false })
+      preRoll.current = []
+      if (ready.current && !finishingTurn.current && phaseRef.current !== "thinking") transition(playback.current.size ? "speaking" : "muted")
+      return
+    }
+    finishingTurn.current = true
+    transition(playback.current.size ? "speaking" : "thinking")
+    // Flush the last partial audio packet before sending the turn boundary.
+    capture.current?.port.postMessage({ recording: false })
+    flushTimer.current = setTimeout(completeTurn, 250)
+  }
+  function enableMicrophone() {
+    if (!ready.current || !running.current || finishingTurn.current) return
+    listeningWanted.current = true; preRoll.current = []
+    setMicrophoneOn(true); setError("")
+    capture.current?.port.postMessage({ recording: true })
+    stream.current?.getAudioTracks().forEach((track) => { track.enabled = true })
+    if (!playback.current.size && phaseRef.current !== "thinking") transition("listening")
+    lastActivity.current = Date.now()
+    void audioContext.current?.resume().catch(() => pause("Click the microphone to enable audio playback."))
+  }
   function beginSpeech(now: number) {
+    if (!listeningWanted.current || finishingTurn.current) return
     speaking.current = true; speechStarted.current = now
     clearPlayback(); suppressOutput.current = false; generationDone.current = false
     transcript.current = { userId: "", user: "", assistantId: "", assistant: "" }
@@ -181,19 +219,38 @@ export function useVoiceConversation(options: Options) {
   }
   function onMicrophone(pcm: ArrayBuffer, rms: number) {
     if (!ready.current || !running.current) return
+    if (finishingTurn.current) {
+      // The manual mute's final buffered packet still belongs to the submitted turn.
+      if (speaking.current) send({ realtimeInput: { audio: { data: base64(pcm), mimeType: "audio/pcm;rate=16000" } } })
+      return
+    }
+    if (!listeningWanted.current) return
     const now = Date.now()
     if (rms > 0.018) {
       lastSpeech.current = now; lastActivity.current = now
       if (!speaking.current) beginSpeech(now)
     }
     if (speaking.current) {
-      if ((now - lastSpeech.current > 900) || now - speechStarted.current > 30_000) { finishTurn(); return }
+      if (now - lastSpeech.current > 900 || now - speechStarted.current > 30_000) {
+        // Silence submits the turn while leaving the mic enabled for natural conversation.
+        send({ realtimeInput: { activityEnd: {} } })
+        speaking.current = false; preRoll.current = []
+        transition(playback.current.size ? "speaking" : "thinking")
+        return
+      }
       if ((socket.current?.bufferedAmount || 0) > 256_000) { pause("The connection is too slow for live audio. Click the header microphone to reconnect."); return }
       send({ realtimeInput: { audio: { data: base64(pcm), mimeType: "audio/pcm;rate=16000" } } })
     } else {
       preRoll.current.push(pcm)
       if (preRoll.current.length > 3) preRoll.current.shift()
     }
+  }
+  function toggleMicrophone() {
+    if (!running.current || phaseRef.current === "paused") { void start(); return }
+    if (finishingTurn.current) return
+    if (listeningWanted.current) finishTurn()
+    else if (ready.current) enableMicrophone()
+    else { listeningWanted.current = true; setMicrophoneOn(true) }
   }
 
   async function start() {
@@ -204,6 +261,7 @@ export function useVoiceConversation(options: Options) {
     const valid = () => running.current && current === version.current
     running.current = true; suppressOutput.current = false; generationDone.current = false
     transcript.current = { userId: "", user: "", assistantId: "", assistant: "" }
+    listeningWanted.current = true; setMicrophoneOn(true)
     setActive(true); setError(""); transition("connecting")
     controller.current = new AbortController()
     const signal = controller.current.signal
@@ -215,6 +273,7 @@ export function useVoiceConversation(options: Options) {
       await context.resume()
       const microphone = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
       if (!valid()) { microphone.getTracks().forEach((track) => track.stop()); return }
+      microphone.getAudioTracks().forEach((track) => { track.enabled = false })
       stream.current = microphone
       setInputStream(microphone)
       const output = context.createMediaStreamDestination()
@@ -227,7 +286,11 @@ export function useVoiceConversation(options: Options) {
       const silence = context.createGain(); silence.gain.value = 0
       source.current = input; capture.current = worklet; mute.current = silence
       input.connect(worklet); worklet.connect(silence); silence.connect(context.destination)
-      worklet.port.onmessage = (event: MessageEvent<{ pcm: ArrayBuffer; rms: number }>) => { if (valid()) onMicrophone(event.data.pcm, event.data.rms) }
+      worklet.port.onmessage = (event: MessageEvent<{ pcm?: ArrayBuffer; rms?: number; stopped?: boolean }>) => {
+        if (!valid()) return
+        if (event.data.pcm) onMicrophone(event.data.pcm, event.data.rms ?? 0)
+        if (event.data.stopped) completeTurn()
+      }
       const response = await fetch("/api/live/session", { method: "POST", signal })
       const session = await response.json()
       if (!response.ok) throw new Error(session.error || "Gemini Live could not start.")
@@ -255,7 +318,8 @@ export function useVoiceConversation(options: Options) {
           if (message.error) { pause(message.error.message || "Gemini Live reported a session error."); return }
           if (message.setupComplete) {
             if (setupTimer.current) clearTimeout(setupTimer.current)
-            ready.current = true; lastActivity.current = Date.now(); transition("listening")
+            ready.current = true; lastActivity.current = Date.now()
+            if (listeningWanted.current) enableMicrophone(); else transition("muted")
             void updateContext(true, signal).catch(() => { if (valid()) setError("The page context could not be loaded. You can still talk with Prism.") })
             const started = Date.now()
             timer.current = setInterval(() => {
@@ -265,7 +329,7 @@ export function useVoiceConversation(options: Options) {
             }, 1000)
           }
           const content = message.serverContent
-          if (content?.interrupted) { clearPlayback(); suppressOutput.current = false; generationDone.current = true; if (!speaking.current) transition("listening") }
+          if (content?.interrupted) { clearPlayback(); suppressOutput.current = false; generationDone.current = true; if (!speaking.current) transition(listeningWanted.current ? "listening" : "muted") }
           if (content?.inputTranscription?.text) transcribe("user", content.inputTranscription.text)
           if (!speaking.current && !suppressOutput.current && content?.outputTranscription?.text) transcribe("assistant", content.outputTranscription.text)
           for (const part of content?.modelTurn?.parts || []) {
@@ -273,7 +337,7 @@ export function useVoiceConversation(options: Options) {
           }
           if (content?.generationComplete || content?.turnComplete) {
             generationDone.current = true
-            if (!playback.current.size && !speaking.current) transition("listening")
+            if (!playback.current.size && !speaking.current) transition(listeningWanted.current ? "listening" : "muted")
           }
           if (message.goAway) pause("Gemini Live is ending this connection. Click the header microphone for a fresh session.")
         } catch { if (valid()) pause("A live audio message could not be read. Click the header microphone to reconnect.") }
@@ -289,11 +353,11 @@ export function useVoiceConversation(options: Options) {
   function interrupt() {
     if (!ready.current) return
     clearPlayback(); suppressOutput.current = true
-    if (speaking.current) finishTurn()
-    send({ realtimeInput: { activityStart: {} } })
-    send({ realtimeInput: { activityEnd: {} } })
-    transition("listening"); lastActivity.current = Date.now()
+    finishTurn()
+    if (!finishingTurn.current) transition("muted")
+    lastActivity.current = Date.now()
   }
+
   useEffect(() => {
     if (!ready.current) return
     send({ clientContent: { turns: [{ role: "user", parts: [{ text: `Conversation preferences changed: ${languagePreference(options.language)} Match my selected ${options.proficiency || "intermediate"} response depth. Wait for my next spoken turn.` }] }], turnComplete: false } })
@@ -305,5 +369,5 @@ export function useVoiceConversation(options: Options) {
     // Send page changes once, avoiding repeated document tokens on every audio chunk.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [options.contextKey])
-  return { active, phase, error, inputStream, outputStream, start, stop, interrupt, resume: start, finishTurn }
+  return { active, phase, error, microphoneOn, toggleMicrophone, inputStream, outputStream, start, stop, interrupt, resume: start, finishTurn }
 }

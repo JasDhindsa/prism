@@ -9,7 +9,7 @@ export const maxDuration = 900
 export async function POST(request: Request) {
   try {
     sameOrigin(request)
-    const input = validateInput(await readJson(request))
+    const input = validateInput(await readJson(request, 9_000_000))
     rateLimit(request, "reader", 30)
     if (input.action === "video") {
       rateLimit(request, "video", 3)

@@ -2,11 +2,11 @@
 
 import Link from "next/link"
 import { useParams } from "next/navigation"
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent } from "react"
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist"
 import {
   RiArrowLeftLine, RiArrowUpLine, RiCloseLine, RiCropLine,
-  RiLayoutLeftLine, RiMicLine, RiResetLeftLine, RiSearchLine, RiSparklingLine, RiMessage2Line,
+  RiLayoutLeftLine, RiMicLine, RiMicOffLine, RiResetLeftLine, RiSearchLine, RiSparklingLine, RiMessage2Line,
   RiCursorLine, RiEraserLine, RiMarkPenLine, RiPencilLine, RiStickyNoteLine, RiArrowGoBackLine,
 } from "@remixicon/react"
 import { MarkupLayer, type MarkupTool, type PageMarkup } from "./markup-layer"
@@ -30,7 +30,9 @@ import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useLibraryStore } from "@/lib/library-store"
 import { readPdfPageText } from "@/lib/pdf-text"
+import { cachedPdfCanvas, cachePdfCanvas } from "@/lib/pdf-render-cache"
 import { retrieveDocumentPassages } from "@/lib/document-retrieval"
+import { retrieveChatDocumentContext } from "@/lib/chat-document-context"
 import type { AnnotationRect, ReaderAction, ReaderAnnotation, ReaderInput, ReaderResponse } from "@/lib/reader-types"
 import { SpeechPlayer } from "@/components/speech-player"
 import { MarkdownMessage } from "@/components/markdown-message"
@@ -43,11 +45,13 @@ import { readSelectionImage } from "@/lib/selection-ocr"
 import { SelectionSpeech } from "@/components/selection-speech"
 import { useSelectionSpeech } from "@/hooks/use-selection-speech"
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { useReaderSmoothScroll } from "@/hooks/use-reader-smooth-scroll"
+import "lenis/dist/lenis.css"
 import "./reader.css"
 
 type Selection = { page: number; text: string; rects: AnnotationRect[]; image?: string }
 type Result = { page: number; snippet: string }
-type ChatMessage = { id: string; role: "user" | "assistant"; text: string; speechText?: string; voice?: boolean }
+type ChatMessage = { id: string; role: "user" | "assistant"; text: string; speechText?: string; voice?: boolean; sourcePages?: number[] }
 type SpeechPlayer = ReturnType<typeof useSelectionSpeech>
 
 const annotationColors = ["#f59e0b", "#10b981", "#8b5cf6", "#ec4899", "#0ea5e9", "#f97316", "#14b8a6", "#6366f1", "#f43f5e", "#84cc16"] as const
@@ -137,11 +141,11 @@ function layoutAnnotationPins(annotations: ReaderAnnotation[], width: number, he
   })
 }
 
-function PdfPage({ pdf, number, zoom, areaEnabled, selection, annotations, markups, markupTool, markupColor, openMarkupNoteId, onAddMarkup, onUpdateMarkup, onDeleteMarkup, onOpenMarkupNote, openAnnotationId, audioAnnotationId, speechPlayer, onSelect, onClearSelection, onSelectionAction, onOpenAnnotation, onCloseAnnotation, onDeleteAnnotation, onSpeakAnnotation, onError }: { pdf: PDFDocumentProxy; number: number; zoom: number; areaEnabled: boolean; selection: Selection | null; annotations: ReaderAnnotation[]; markups: PageMarkup[]; markupTool: MarkupTool; markupColor: string; openMarkupNoteId: string | null; onAddMarkup: (mark: PageMarkup) => void; onUpdateMarkup: (mark: PageMarkup) => void; onDeleteMarkup: (id: string) => void; onOpenMarkupNote: (id: string | null) => void; openAnnotationId: string | null; audioAnnotationId: string | null; speechPlayer: SpeechPlayer; onSelect: (selection: Selection) => void; onClearSelection: () => void; onSelectionAction: (action: Exclude<ReaderAction, "ask">) => void; onOpenAnnotation: (annotation: ReaderAnnotation) => void; onCloseAnnotation: (id: string) => void; onDeleteAnnotation: (annotation: ReaderAnnotation) => void; onSpeakAnnotation: (annotation: ReaderAnnotation) => void; onError: (message: string) => void }) {
+function PdfPage({ pdf, number, zoom, pageDimensions, areaEnabled, selection, annotations, markups, markupTool, markupColor, openMarkupNoteId, onAddMarkup, onUpdateMarkup, onDeleteMarkup, onOpenMarkupNote, openAnnotationId, audioAnnotationId, speechPlayer, onSelect, onClearSelection, onSelectionAction, onOpenAnnotation, onCloseAnnotation, onDeleteAnnotation, onSpeakAnnotation, onError }: { pdf: PDFDocumentProxy; number: number; zoom: number; pageDimensions: { width: number; height: number }; areaEnabled: boolean; selection: Selection | null; annotations: ReaderAnnotation[]; markups: PageMarkup[]; markupTool: MarkupTool; markupColor: string; openMarkupNoteId: string | null; onAddMarkup: (mark: PageMarkup) => void; onUpdateMarkup: (mark: PageMarkup) => void; onDeleteMarkup: (id: string) => void; onOpenMarkupNote: (id: string | null) => void; openAnnotationId: string | null; audioAnnotationId: string | null; speechPlayer: SpeechPlayer; onSelect: (selection: Selection) => void; onClearSelection: () => void; onSelectionAction: (action: Exclude<ReaderAction, "ask">) => void; onOpenAnnotation: (annotation: ReaderAnnotation) => void; onCloseAnnotation: (id: string) => void; onDeleteAnnotation: (annotation: ReaderAnnotation) => void; onSpeakAnnotation: (annotation: ReaderAnnotation) => void; onError: (message: string) => void }) {
   const wrap = useRef<HTMLDivElement>(null)
   const canvas = useRef<HTMLCanvasElement>(null)
-  const [width, setWidth] = useState(800)
-  const [dimensions, setDimensions] = useState({ width: 800, height: 1060 })
+  const dimensions = pageDimensions
+  const width = dimensions.width / zoom
   const [hoveredAnnotationId, setHoveredAnnotationId] = useState<string | null>(null)
   const pins = useMemo(() => layoutAnnotationPins(annotations.filter((annotation) => annotation.page === number && annotation.rects?.length), dimensions.width, dimensions.height), [annotations, number, dimensions.width, dimensions.height])
   const activeAnnotationId = hoveredAnnotationId || openAnnotationId
@@ -154,36 +158,42 @@ function PdfPage({ pdf, number, zoom, areaEnabled, selection, annotations, marku
   const [drag, setDrag] = useState<AnnotationRect | null>(null)
   const dragStart = useRef<{ x: number; y: number } | null>(null)
 
-  useEffect(() => {
-    const target = wrap.current
-    if (!target) return
-    const observer = new ResizeObserver(([entry]) => setWidth(Math.max(280, Math.min(920, entry.contentRect.width - 32))))
-    observer.observe(target)
-    return () => observer.disconnect()
-  }, [])
-
-  useEffect(() => {
+  useLayoutEffect(() => {
     let cancelled = false
     let renderTask: ReturnType<PDFPageProxy["render"]> | undefined
-    async function render() {
-      const page = await pdf.getPage(number)
-      if (cancelled || !canvas.current) return
-      const viewport = page.getViewport({ scale: (width / page.getViewport({ scale: 1 }).width) * zoom })
-      const ratio = Math.min(window.devicePixelRatio || 1, 2)
-      const target = canvas.current
+    const target = canvas.current
+    if (!target) return
+    const ratio = Math.min(window.devicePixelRatio || 1, 2)
+    const key = `${number}:${dimensions.width.toFixed(2)}:${dimensions.height.toFixed(2)}:${ratio}`
+    function display(completed: HTMLCanvasElement) {
+      if (cancelled || !target) return
       const context = target.getContext("2d")
       if (!context) return
-      target.width = Math.floor(viewport.width * ratio)
-      target.height = Math.floor(viewport.height * ratio)
-      target.style.width = `${viewport.width}px`
-      target.style.height = `${viewport.height}px`
-      setDimensions({ width: viewport.width, height: viewport.height })
-      renderTask = page.render({ canvas: target, canvasContext: context, viewport, transform: [ratio, 0, 0, ratio, 0, 0] })
+      target.width = completed.width; target.height = completed.height
+      target.style.width = `${dimensions.width}px`; target.style.height = `${dimensions.height}px`
+      context.drawImage(completed, 0, 0)
+    }
+    const cached = cachedPdfCanvas(pdf, key)
+    if (cached) { display(cached); return }
+    async function render() {
+      const page = await pdf.getPage(number)
+      if (cancelled) return
+      const viewport = page.getViewport({ scale: (width / page.getViewport({ scale: 1 }).width) * zoom })
+      // Each task owns its canvas. A cancelled render cannot clear or overwrite the page.
+      const staging = document.createElement("canvas")
+      staging.width = Math.ceil(viewport.width * ratio)
+      staging.height = Math.ceil(viewport.height * ratio)
+      const context = staging.getContext("2d")
+      if (!context) return
+      renderTask = page.render({ canvas: staging, canvasContext: context, viewport, transform: [ratio, 0, 0, ratio, 0, 0] })
       await renderTask.promise
+      if (cancelled) return
+      cachePdfCanvas(pdf, key, staging)
+      display(staging)
     }
     void render().catch((error: unknown) => { if (!cancelled && (error as Error)?.name !== "RenderingCancelledException") onError("This PDF page could not be rendered.") })
     return () => { cancelled = true; renderTask?.cancel() }
-  }, [pdf, number, width, zoom, onError])
+  }, [pdf, number, width, zoom, dimensions.width, dimensions.height, onError])
 
   function point(event: PointerEvent<HTMLDivElement>) {
     const bounds = event.currentTarget.getBoundingClientRect()
@@ -209,14 +219,14 @@ function PdfPage({ pdf, number, zoom, areaEnabled, selection, annotations, marku
 
   return <div ref={wrap} className="reader-page-wrap">
     <div className="reader-page" style={{ width: dimensions.width, height: dimensions.height }}>
-      <canvas ref={canvas} className="reader-page-canvas" />
+      <canvas ref={canvas} className="reader-page-canvas" style={{ width: dimensions.width, height: dimensions.height }} />
       {!areaEnabled && <MarkupLayer page={number} width={dimensions.width} height={dimensions.height} tool={markupTool} color={markupColor} marks={markups} openNoteId={openMarkupNoteId} onAdd={onAddMarkup} onUpdate={onUpdateMarkup} onDelete={onDeleteMarkup} onOpenNote={onOpenMarkupNote} />}
       {areaEnabled && <div className="reader-area-layer" aria-label="Drag to select an area" onPointerDown={(event) => { dragStart.current = point(event); event.currentTarget.setPointerCapture(event.pointerId) }} onPointerMove={(event) => { if (!dragStart.current) return; const end = point(event), start = dragStart.current; setDrag({ x: Math.min(start.x, end.x), y: Math.min(start.y, end.y), width: Math.abs(start.x - end.x), height: Math.abs(start.y - end.y) }) }} onPointerUp={finishArea} onPointerCancel={() => { dragStart.current = null; setDrag(null) }}>
         {drag && <span className="reader-area-rect" style={{ left: `${drag.x * 100}%`, top: `${drag.y * 100}%`, width: `${drag.width * 100}%`, height: `${drag.height * 100}%` }} />}
       </div>}
       {!areaEnabled && selection?.page === number && selection.rects.map((rect, index) => <span key={index} className="reader-area-selected" style={{ left: `${rect.x * 100}%`, top: `${rect.y * 100}%`, width: `${rect.width * 100}%`, height: `${rect.height * 100}%` }} />)}
       {!areaEnabled && selection?.page === number && <div className="reader-selection-menu" style={{ left: Math.max(8, Math.min(dimensions.width - 400, selection.rects[0].x * dimensions.width)), top: Math.max(8, Math.min(dimensions.height - 44, (selection.rects[0].y + selection.rects[0].height) * dimensions.height + 10)) }}>
-        <ButtonGroup aria-label="Create annotation"><Button variant="ghost" size="sm" onClick={() => onSelectionAction("adapt")}>Adapt</Button><Button variant="ghost" size="sm" onClick={() => onSelectionAction("quiz")}>Quiz</Button><Button variant="ghost" size="sm" onClick={() => onSelectionAction("translate")}>Translate</Button><Button variant="ghost" size="sm" onClick={() => onSelectionAction("pronunciation")}>Pronounce</Button><Button variant="ghost" size="sm" onClick={() => onSelectionAction("video")}>Video</Button><IconButton label="Clear selection" onClick={onClearSelection}><RiCloseLine className="size-4" /></IconButton></ButtonGroup>
+        <ButtonGroup aria-label="Create annotation"><Button variant="ghost" size="sm" onClick={() => onSelectionAction("explain")}>Explain</Button><Button variant="ghost" size="sm" onClick={() => onSelectionAction("quiz")}>Quiz</Button><Button variant="ghost" size="sm" onClick={() => onSelectionAction("translate")}>Translate</Button><Button variant="ghost" size="sm" onClick={() => onSelectionAction("pronunciation")}>Pronounce</Button><Button variant="ghost" size="sm" onClick={() => onSelectionAction("video")}>Video</Button><IconButton label="Clear selection" onClick={onClearSelection}><RiCloseLine className="size-4" /></IconButton></ButtonGroup>
       </div>}
       {!areaEnabled && <svg className="reader-annotation-targets" width={dimensions.width} height={dimensions.height} aria-hidden="true">
         {[...sourceAreas].map(([key, { rect, active, color }]) => <rect key={key} className={active ? "reader-annotation-area reader-annotation-area-active" : "reader-annotation-area"} style={{ "--annotation-color": color } as React.CSSProperties} x={rect.x * dimensions.width} y={rect.y * dimensions.height} width={rect.width * dimensions.width} height={rect.height * dimensions.height} rx={3} />)}
@@ -226,7 +236,7 @@ function PdfPage({ pdf, number, zoom, areaEnabled, selection, annotations, marku
         if (!position) return null
         const isOpen = openAnnotationId === annotation.id
         return <Popover key={annotation.id} open={isOpen} onOpenChange={(open, details) => { if (open) onOpenAnnotation(annotation); else if (["trigger-press", "escape-key", "close-press"].includes(details.reason)) onCloseAnnotation(annotation.id) }}>
-          <PopoverTrigger render={<Button size="icon-xs" variant="secondary" className="reader-note-pin" data-annotation-id={annotation.id} style={{ left: position.x, top: position.y, "--annotation-color": annotationColor(annotation.colorIndex) } as React.CSSProperties} aria-label={`Open ${annotation.kind}: ${annotation.title}, selected area on page ${number}`} title={`${annotation.kind}: ${annotation.title}`} aria-pressed={isOpen} onPointerEnter={() => setHoveredAnnotationId(annotation.id)} onPointerLeave={() => setHoveredAnnotationId(null)} onFocus={() => setHoveredAnnotationId(annotation.id)} onBlur={() => setHoveredAnnotationId(null)}><AnnotationTypeIcon kind={annotation.kind} className="size-3" /></Button>} />
+          <PopoverTrigger render={<Button size="icon-xs" variant="secondary" className="reader-note-pin" data-annotation-id={annotation.id} style={{ left: position.x, top: position.y, "--annotation-color": annotationColor(annotation.colorIndex) } as React.CSSProperties} aria-label={`Open ${annotation.kind === "adaptation" ? "Explanation" : annotation.kind}: ${annotation.kind === "adaptation" ? annotation.title.replace(/^Adapted(?: passage)?/i, "Explanation") : annotation.title}, selected area on page ${number}`} title={`${annotation.kind === "adaptation" ? "Explanation" : annotation.kind}: ${annotation.kind === "adaptation" ? annotation.title.replace(/^Adapted(?: passage)?/i, "Explanation") : annotation.title}`} aria-pressed={isOpen} onPointerEnter={() => setHoveredAnnotationId(annotation.id)} onPointerLeave={() => setHoveredAnnotationId(null)} onFocus={() => setHoveredAnnotationId(annotation.id)} onBlur={() => setHoveredAnnotationId(null)}><AnnotationTypeIcon kind={annotation.kind} className="size-3" /></Button>} />
           <PopoverContent side="right" align="start" sideOffset={14} className="reader-note-popover">
             <AnnotationCard annotation={annotation} progressKey={`prism-quiz-progress:${pdf.fingerprints[0]}:${annotation.id}`} onClose={() => onCloseAnnotation(annotation.id)} onDelete={() => onDeleteAnnotation(annotation)} onSpeak={() => onSpeakAnnotation(annotation)} pronunciationPlayer={audioAnnotationId === annotation.id ? speechPlayer : undefined} />
           </PopoverContent>
@@ -239,28 +249,45 @@ function PdfPage({ pdf, number, zoom, areaEnabled, selection, annotations, marku
 function LazyPdfPage({ pdf, number, zoom, areaEnabled, selection, annotations, markups, markupTool, markupColor, openMarkupNoteId, onAddMarkup, onUpdateMarkup, onDeleteMarkup, onOpenMarkupNote, openAnnotationId, audioAnnotationId, speechPlayer, scrollRoot, onSelect, onClearSelection, onSelectionAction, onOpenAnnotation, onCloseAnnotation, onDeleteAnnotation, onSpeakAnnotation, onError }: { pdf: PDFDocumentProxy; number: number; zoom: number; areaEnabled: boolean; selection: Selection | null; annotations: ReaderAnnotation[]; markups: PageMarkup[]; markupTool: MarkupTool; markupColor: string; openMarkupNoteId: string | null; onAddMarkup: (mark: PageMarkup) => void; onUpdateMarkup: (mark: PageMarkup) => void; onDeleteMarkup: (id: string) => void; onOpenMarkupNote: (id: string | null) => void; openAnnotationId: string | null; audioAnnotationId: string | null; speechPlayer: SpeechPlayer; scrollRoot: React.RefObject<HTMLDivElement | null>; onSelect: (selection: Selection) => void; onClearSelection: () => void; onSelectionAction: (action: Exclude<ReaderAction, "ask">) => void; onOpenAnnotation: (annotation: ReaderAnnotation) => void; onCloseAnnotation: (id: string) => void; onDeleteAnnotation: (annotation: ReaderAnnotation) => void; onSpeakAnnotation: (annotation: ReaderAnnotation) => void; onError: (message: string) => void }) {
   const section = useRef<HTMLElement>(null)
   const [visible, setVisible] = useState(number <= 2)
-  const [height, setHeight] = useState<number | null>(null)
+  const [width, setWidth] = useState(800)
+  const [aspectRatio, setAspectRatio] = useState<number | null>(null)
+  const dimensions = { width: width * zoom, height: width * zoom / (aspectRatio || 800 / 1060) }
+
+  useEffect(() => {
+    let active = true
+    // Page metadata reserves the correct space even before its bitmap is loaded.
+    void pdf.getPage(number).then((page) => {
+      if (!active) return
+      const viewport = page.getViewport({ scale: 1 })
+      setAspectRatio(viewport.width / viewport.height)
+    }).catch(() => undefined)
+    return () => { active = false }
+  }, [pdf, number])
+
+  useLayoutEffect(() => {
+    const target = section.current
+    if (!target) return
+    const measure = () => setWidth(Math.max(280, Math.min(920, target.clientWidth - 32)))
+    const observer = new ResizeObserver(measure)
+    observer.observe(target)
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(() => {
     const target = section.current
     if (!target) return
-    const observer = new IntersectionObserver(([entry]) => setVisible(entry.isIntersecting), { root: scrollRoot.current, rootMargin: "900px 0px" })
+    let unload: ReturnType<typeof setTimeout> | undefined
+    const observer = new IntersectionObserver(([entry]) => {
+      clearTimeout(unload)
+      if (entry.isIntersecting) setVisible(true)
+      else unload = setTimeout(() => setVisible(false), 1000)
+    }, { root: scrollRoot.current, rootMargin: "1600px 0px" })
     observer.observe(target)
-    return () => observer.disconnect()
+    return () => { clearTimeout(unload); observer.disconnect() }
   }, [scrollRoot])
 
-  useEffect(() => {
-    const target = section.current
-    if (!visible || !target) return
-    const observer = new ResizeObserver(([entry]) => {
-      if (entry.contentRect.height > 200) setHeight(entry.contentRect.height)
-    })
-    observer.observe(target)
-    return () => observer.disconnect()
-  }, [visible])
-
-  return <section ref={section} id={`reader-page-${number}`} data-page-number={number} className="reader-page-section" style={!visible && height ? { minHeight: height } : undefined} aria-label={`Page ${number}`}>
-    {visible || annotations.some((annotation) => annotation.page === number && annotation.id === openAnnotationId) || markups.some((mark) => mark.id === openMarkupNoteId) ? <PdfPage pdf={pdf} number={number} zoom={zoom} areaEnabled={areaEnabled} selection={selection} annotations={annotations} markups={markups} markupTool={markupTool} markupColor={markupColor} openMarkupNoteId={openMarkupNoteId} onAddMarkup={onAddMarkup} onUpdateMarkup={onUpdateMarkup} onDeleteMarkup={onDeleteMarkup} onOpenMarkupNote={onOpenMarkupNote} openAnnotationId={openAnnotationId} audioAnnotationId={audioAnnotationId} speechPlayer={speechPlayer} onSelect={onSelect} onClearSelection={onClearSelection} onSelectionAction={onSelectionAction} onOpenAnnotation={onOpenAnnotation} onCloseAnnotation={onCloseAnnotation} onDeleteAnnotation={onDeleteAnnotation} onSpeakAnnotation={onSpeakAnnotation} onError={onError} /> : <div className="reader-page-placeholder" style={height ? { minHeight: Math.max(300, height - 28) } : undefined} aria-hidden="true" />}
+  return <section ref={section} id={`reader-page-${number}`} data-page-number={number} className="reader-page-section" style={{ minHeight: dimensions.height + 28 }} aria-label={`Page ${number}`}>
+    {aspectRatio && (visible || selection?.page === number || annotations.some((annotation) => annotation.page === number && annotation.id === openAnnotationId) || markups.some((mark) => mark.page === number && mark.id === openMarkupNoteId)) ? <PdfPage pdf={pdf} number={number} zoom={zoom} pageDimensions={dimensions} areaEnabled={areaEnabled} selection={selection} annotations={annotations} markups={markups} markupTool={markupTool} markupColor={markupColor} openMarkupNoteId={openMarkupNoteId} onAddMarkup={onAddMarkup} onUpdateMarkup={onUpdateMarkup} onDeleteMarkup={onDeleteMarkup} onOpenMarkupNote={onOpenMarkupNote} openAnnotationId={openAnnotationId} audioAnnotationId={audioAnnotationId} speechPlayer={speechPlayer} onSelect={onSelect} onClearSelection={onClearSelection} onSelectionAction={onSelectionAction} onOpenAnnotation={onOpenAnnotation} onCloseAnnotation={onCloseAnnotation} onDeleteAnnotation={onDeleteAnnotation} onSpeakAnnotation={onSpeakAnnotation} onError={onError} /> : <div className="reader-page-placeholder" style={{ width: dimensions.width, height: dimensions.height, minHeight: 0 }} aria-hidden="true" />}
     <span className="reader-page-caption">{number}</span>
   </section>
 }
@@ -292,6 +319,7 @@ export default function ReaderPage() {
   const [assistantOpen, setAssistantOpen] = useState(false)
   const [openAnnotationId, setOpenAnnotationId] = useState<string | null>(null)
   const [prompt, setPrompt] = useState("")
+  const [advancedThink, setAdvancedThink] = useState(false)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatError, setChatError] = useState("")
   const [busy, setBusy] = useState(false)
@@ -317,6 +345,8 @@ export default function ReaderPage() {
   const voiceStop = useRef(voice.stop)
   useEffect(() => { voiceStop.current = voice.stop }, [voice.stop])
   const stage = useRef<HTMLDivElement>(null)
+  const pagesContent = useRef<HTMLDivElement>(null)
+  const smoothScroll = useReaderSmoothScroll(stage, pagesContent, !!pdf && !loading)
   const openedDeepLink = useRef<string | null>(null)
   const annotations = savedAnnotations
 
@@ -399,7 +429,8 @@ export default function ReaderPage() {
       const container = stage.current
       if (!container) return
       const top = container.scrollTop + element.getBoundingClientRect().top - container.getBoundingClientRect().top - offset
-      container.scrollTo({ top: Math.max(0, top), behavior: "auto" })
+      if (smoothScroll.current) smoothScroll.current.scrollTo(Math.max(0, top), { immediate: true })
+      else container.scrollTo({ top: Math.max(0, top), behavior: "auto" })
     }
     let frame = 0
     let attempts = 0
@@ -428,7 +459,7 @@ export default function ReaderPage() {
       frame = requestAnimationFrame(scrollToAnnotation)
     })
     return () => cancelAnimationFrame(frame)
-  }, [pdf, savedAnnotations])
+  }, [pdf, savedAnnotations, smoothScroll])
 
   const goToPage = useCallback((number: number) => {
     if (!pdf) return
@@ -436,8 +467,13 @@ export default function ReaderPage() {
     setPage(target)
     setSelection(null)
     setAreaEnabled(false)
-    document.getElementById(`reader-page-${target}`)?.scrollIntoView({ behavior: "smooth", block: "start" })
-  }, [pdf])
+    const section = document.getElementById(`reader-page-${target}`)
+    const container = stage.current
+    if (!section || !container) return
+    const top = Math.max(0, container.scrollTop + section.getBoundingClientRect().top - container.getBoundingClientRect().top - 24)
+    if (smoothScroll.current) { smoothScroll.current.resize(); smoothScroll.current.scrollTo(top, { duration: 0.7 }) }
+    else container.scrollTo({ top, behavior: "auto" })
+  }, [pdf, smoothScroll])
 
   useEffect(() => {
     const container = stage.current
@@ -523,16 +559,27 @@ export default function ReaderPage() {
     finally { setSearching(false); setSearched(true) }
   }
 
-  async function pageImage(number: number) {
+  async function pageImage(number: number, thumbnail = false) {
     if (!pdf) return undefined
     const pdfPage = await pdf.getPage(number)
-    const viewport = pdfPage.getViewport({ scale: Math.min(1.5, 1400 / pdfPage.getViewport({ scale: 1 }).width) })
+    const original = pdfPage.getViewport({ scale: 1 })
+    const viewport = pdfPage.getViewport({ scale: Math.min(1.5, (thumbnail ? 800 : 1300) / Math.max(original.width, original.height)) })
     const canvas = document.createElement("canvas")
     canvas.width = Math.ceil(viewport.width); canvas.height = Math.ceil(viewport.height)
     const context = canvas.getContext("2d")
     if (!context) return undefined
     await pdfPage.render({ canvas, canvasContext: context, viewport }).promise
-    return canvas.toDataURL("image/jpeg", 0.8)
+    let image = canvas.toDataURL("image/jpeg", 0.75)
+    // Bound each multimodal page so six pages fit comfortably in one request.
+    if (image.length > 900_000) image = canvas.toDataURL("image/jpeg", 0.4)
+    if (image.length > 900_000) {
+      const smaller = document.createElement("canvas")
+      const factor = Math.sqrt(800_000 / image.length) * 0.8
+      smaller.width = Math.max(1, Math.floor(canvas.width * factor)); smaller.height = Math.max(1, Math.floor(canvas.height * factor))
+      smaller.getContext("2d")?.drawImage(canvas, 0, 0, smaller.width, smaller.height)
+      image = smaller.toDataURL("image/jpeg", 0.5)
+    }
+    return image
   }
 
   async function requestAi(input: ReaderInput, signal?: AbortSignal): Promise<ReaderResponse> {
@@ -562,13 +609,13 @@ export default function ReaderPage() {
     if (busyRef.current) return
     busyRef.current = true
     setPendingAnnotation(null); setAssistantOpen(false)
-    setBusy(true); setBusyLabel(action === "video" ? "Finding relevant passages in this PDF…" : "Generating from your reviewed selection…"); setError("")
+    setBusy(true); setBusyLabel(action === "video" ? "Finding relevant passages in this PDF…" : selected.image ? "Creating your quiz from the selected image…" : "Generating from your reviewed selection…"); setError("")
     try {
       const documentPassages = action === "video" && pdf ? await retrieveDocumentPassages(pdf, draft.text, draft.topic, selected.page) : undefined
       if (action === "video") setBusyLabel("Planning your animated lesson…")
-      const result = await requestAi({ action, selection: draft.text, context: action === "video" ? undefined : draft.text, documentPassages, image: selected.image, prompt: [draft.topic ? `Focus: ${draft.topic}` : "", draft.instructions].filter(Boolean).join("\n"), language: draft.language, sourceConfirmed: action !== "video" || !selected.image, detailed: draft.detailed })
+      const result = await requestAi({ action, selection: draft.text, context: action === "video" ? undefined : draft.text, documentPassages, image: selected.image, prompt: [draft.topic ? `Focus: ${draft.topic}` : "", draft.instructions].filter(Boolean).join("\n"), language: draft.language, sourceConfirmed: !selected.image || (action !== "video" && action !== "quiz"), detailed: draft.detailed })
       const kind = (action === "adapt" || action === "explain") ? "adaptation" : action === "translate" ? "translation" : action
-      const title = result.title || draft.topic || { adapt: `Adapted · ${proficiencyLevels.find((level) => level.value === proficiency)?.label}`, explain: "Adapted passage", quiz: "Check your understanding", translate: `${draft.language} translation`, pronunciation: "How to say it", video: "See it in motion" }[action]
+      const title = result.title || draft.topic || { adapt: `Explanation · ${proficiencyLevels.find((level) => level.value === proficiency)?.label}`, explain: "Explanation", quiz: "Check your understanding", translate: `${draft.language} translation`, pronunciation: "How to say it", video: "See it in motion" }[action]
       if (saveAnnotation({ id: crypto.randomUUID(), kind, title, text: result.answer, page: selected.page, quote: draft.text, rects: selected.rects, quiz: result.quiz, speechText: result.speechText, language: draft.language, proficiency, video: result.video ? { jobId: result.video.id } : undefined, createdAt: Date.now() })) setSelection(null)
     } catch (caught) { setError(caught instanceof Error ? caught.message : "The annotation could not be created.") }
     finally { busyRef.current = false; setBusy(false); setBusyLabel("") }
@@ -586,16 +633,16 @@ export default function ReaderPage() {
       const extracted = selected.image ? await readSelectionImage(selected.image, language, requestSignal, { fresh: true }) : selected.text
       if (requestSignal.aborted) return
       if (!extracted.trim()) throw new Error("No readable text was found in this area. Select a clearer passage and try again.")
-      setBusyLabel(action === "adapt" || action === "explain" ? "Adapting the selected passage…" : action === "translate" ? `Translating into ${language}…` : "Preparing pronunciation…")
+      setBusyLabel(action === "adapt" || action === "explain" ? "Explaining the selected passage…" : action === "translate" ? `Translating into ${language}…` : "Preparing pronunciation…")
       const result: ReaderResponse = action === "pronunciation"
         ? { answer: extracted, speechText: extracted, title: "Pronunciation" }
         : await requestAi({ action, selection: extracted, sourceConfirmed: true }, requestSignal)
       if (requestSignal.aborted) return
-      const adapted = action === "adapt" || action === "explain"
-      const title = result.title || (adapted ? `Adapted · ${proficiencyLevels.find((level) => level.value === proficiency)?.label}` : action === "translate" ? `${language} translation` : "Pronunciation")
+      const explained = action === "adapt" || action === "explain"
+      const title = result.title || (explained ? `Explanation · ${proficiencyLevels.find((level) => level.value === proficiency)?.label}` : action === "translate" ? `${language} translation` : "Pronunciation")
       const annotationId = crypto.randomUUID()
       if (action === "pronunciation") setAudioAnnotationId(annotationId)
-      const saved = saveAnnotation({ id: annotationId, kind: adapted ? "adaptation" : action === "translate" ? "translation" : "pronunciation", title, text: action === "pronunciation" ? "" : result.answer, speechText: result.speechText || (action === "translate" ? result.answer : undefined), speechLanguage: action === "translate" ? speechLanguageCode(language) : result.speechLanguage, page: selected.page, language, proficiency, quote: extracted || undefined, rects: selected.rects, createdAt: Date.now() }, adapted || action === "pronunciation")
+      const saved = saveAnnotation({ id: annotationId, kind: explained ? "adaptation" : action === "translate" ? "translation" : "pronunciation", title, text: action === "pronunciation" ? "" : result.answer, speechText: result.speechText || (action === "translate" ? result.answer : undefined), speechLanguage: action === "translate" ? speechLanguageCode(language) : result.speechLanguage, page: selected.page, language, proficiency, quote: extracted || undefined, rects: selected.rects, createdAt: Date.now() }, explained || action === "pronunciation")
       if (!saved) { if (spoken) selectionSpeech.close(); if (action === "pronunciation") setAudioAnnotationId(null); return }
       setSelection(null)
       if (spoken) {
@@ -646,10 +693,7 @@ export default function ReaderPage() {
   }
 
   function toggleVoice() {
-    if (voiceOpen) {
-      if (voice.phase === "paused" || voice.phase === "idle") { void voice.start(); return }
-      voice.stop(); setVoiceOpen(false); return
-    }
+    if (voiceOpen) { voice.toggleMicrophone(); return }
     if (busyRef.current) return
     selectionSpeech.close()
     setVoiceOpen(true); setAssistantOpen(false); setOpenAnnotationId(null)
@@ -659,6 +703,11 @@ export default function ReaderPage() {
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
       if (event.defaultPrevented || event.isComposing || event.repeat) return
+      if (event.key === "Escape" && voiceOpen) {
+        event.preventDefault()
+        voiceStop.current(); setVoiceOpen(false)
+        return
+      }
       const target = event.target
       if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return
       if (target instanceof Element && target.closest('[contenteditable="true"], [role="dialog"], [role="listbox"], [role="option"], [data-slot="select-content"]')) return
@@ -701,9 +750,12 @@ export default function ReaderPage() {
       const selected = selection
       const number = selected?.page || page
       const pageText = pdf ? await readPdfPageText(await pdf.getPage(number), 10000).catch(() => "") : ""
-      const image = selected?.image || await pageImage(number)
-      const result = await requestAi({ action: "ask", prompt: question, context: selected?.image ? undefined : pageText, selection: selected && !selected.image ? selected.text : undefined, image, history: chatHistory.current.slice(0, -1).slice(-10).map(({ role, text }) => ({ role, text: text.slice(0, 6000) })) })
-      appendChat({ id: crypto.randomUUID(), role: "assistant", text: result.answer })
+      const image = selected?.image || (!advancedThink ? await pageImage(number) : undefined)
+      const questionContext = chatHistory.current.slice(0, -1).filter((message) => message.role === "user").slice(-2).map((message) => message.text).join("\n")
+      const document = advancedThink && pdf ? await retrieveChatDocumentContext(pdf, question, number, [selected && !selected.image ? selected.text : "", questionContext].filter(Boolean).join("\n"), pageImage, setBusyLabel) : undefined
+      if (advancedThink) setBusyLabel("Connecting evidence across pages…")
+      const result = await requestAi({ action: "ask", advancedThink, ...document, prompt: question, context: selected?.image ? undefined : pageText, selection: selected && !selected.image ? selected.text : undefined, image, history: chatHistory.current.slice(0, -1).slice(-10).map(({ role, text }) => ({ role, text: text.slice(0, 6000) })) })
+      appendChat({ id: crypto.randomUUID(), role: "assistant", text: result.answer, sourcePages: result.sourcePages })
     } catch (caught) { setPrompt(question); setChatError(caught instanceof Error ? caught.message : "The question could not be answered.") }
     finally { busyRef.current = false; setBusy(false); setBusyLabel("") }
   }
@@ -721,7 +773,7 @@ export default function ReaderPage() {
         <ReaderToolButton label="Toggle page thumbnails" shortcut="P" variant={sidebar ? "secondary" : "ghost"} aria-pressed={sidebar} onClick={() => setSidebar((value) => !value)}><RiLayoutLeftLine className="size-[18px]" /></ReaderToolButton>
         <ReaderToolButton label="Search PDF" shortcut="/" variant={searchOpen ? "secondary" : "ghost"} aria-pressed={searchOpen} onClick={() => setSearchOpen((value) => !value)}><RiSearchLine className="size-[18px]" /></ReaderToolButton>
         <ReaderToolButton label="Select an area" shortcut="S" variant={areaEnabled ? "secondary" : "ghost"} aria-pressed={areaEnabled} onClick={toggleAreaSelection}><RiCropLine className="size-[18px]" /></ReaderToolButton>
-        <ReaderToolButton label={voiceOpen ? voice.phase === "paused" || voice.phase === "idle" ? "Resume voice conversation" : "End voice conversation" : "Start voice conversation"} shortcut="V" variant={voiceOpen ? "secondary" : "ghost"} className={voiceOpen ? "reader-mic-active" : ""} aria-pressed={voiceOpen} disabled={busy} onClick={toggleVoice}><RiMicLine className="size-[18px]" /></ReaderToolButton>
+        <ReaderToolButton label={voiceOpen ? voice.microphoneOn ? "Mute microphone and send your turn" : "Unmute microphone to speak · Esc to end conversation" : "Start voice conversation"} shortcut="V" variant={voice.microphoneOn ? "secondary" : "ghost"} className={voice.microphoneOn ? "reader-mic-active" : ""} aria-pressed={voice.microphoneOn} disabled={busy} onClick={toggleVoice}>{voiceOpen && !voice.microphoneOn ? <RiMicOffLine className="size-[18px]" /> : <RiMicLine className="size-[18px]" />}</ReaderToolButton>
         <ReaderToolButton label="Ask Prism AI" shortcut="A" variant={assistantOpen ? "secondary" : "ghost"} className="reader-ai-toggle" aria-pressed={assistantOpen} onClick={() => { voice.stop(); setVoiceOpen(false); setAssistantOpen((value) => !value) }}><RiSparklingLine className="size-[18px]" /></ReaderToolButton>
       </ButtonGroup></TooltipProvider>
       <div className="reader-header-end">
@@ -759,7 +811,7 @@ export default function ReaderPage() {
           {!searching && searched && results.length === 0 && <p className="reader-search-empty">No matches found.</p>}
         </div>}
         <div ref={stage} className="reader-stage">
-          {loading ? <div className="reader-loading"><Skeleton className="h-[65vh] w-full max-w-3xl rounded-sm" /></div> : !pdf ? <div className="reader-error"><h1>Couldn’t open this PDF</h1><p>{error || "This book is no longer in your library."}</p><Button variant="secondary" onClick={() => setReloadKey((value) => value + 1)}>Try again</Button><Link href={`/books/${encodeURIComponent(id)}`}>Back to book</Link></div> : <div className="reader-pages">
+          {loading ? <div className="reader-loading"><Skeleton className="h-[65vh] w-full max-w-3xl rounded-sm" /></div> : !pdf ? <div className="reader-error"><h1>Couldn’t open this PDF</h1><p>{error || "This book is no longer in your library."}</p><Button variant="secondary" onClick={() => setReloadKey((value) => value + 1)}>Try again</Button><Link href={`/books/${encodeURIComponent(id)}`}>Back to book</Link></div> : <div ref={pagesContent} className="reader-pages">
             {Array.from({ length: pdf.numPages }, (_, index) => <LazyPdfPage key={index + 1} pdf={pdf} number={index + 1} zoom={zoom} areaEnabled={areaEnabled} selection={selection} annotations={annotations} markups={markups} markupTool={markupTool} markupColor={markupColor} openMarkupNoteId={openMarkupNoteId} onAddMarkup={addMarkup} onUpdateMarkup={updateMarkup} onDeleteMarkup={deleteMarkup} onOpenMarkupNote={setOpenMarkupNoteId} openAnnotationId={openAnnotationId} audioAnnotationId={audioAnnotationId} speechPlayer={selectionSpeech} scrollRoot={stage} onSelect={(value) => { setSelection(value); setAreaEnabled(false); setError("") }} onClearSelection={() => setSelection(null)} onSelectionAction={prepareAnnotation} onOpenAnnotation={openAnnotation} onCloseAnnotation={closeAnnotation} onDeleteAnnotation={deleteAnnotation} onSpeakAnnotation={speakAnnotation} onError={setError} />)}
           </div>}
         </div>
@@ -773,7 +825,7 @@ export default function ReaderPage() {
         <Card className="reader-assistant gap-0" role="complementary" aria-label="Prism AI assistant">
           <CardHeader className="gap-1 border-b">
             <CardTitle>Prism AI</CardTitle>
-            <CardDescription>How can I help with this page?</CardDescription>
+            <CardDescription>{advancedThink ? "Ask across your document." : "How can I help with this page?"}</CardDescription>
             <CardAction className="flex gap-2">
               <Button variant="outline" size="icon" aria-label="Reset conversation" title="Reset conversation" onClick={() => { chatHistory.current = []; setChatMessages([]); setChatError("") }} disabled={busy || voice.active || chatMessages.length === 0}><RiResetLeftLine /></Button>
               <Button variant="outline" size="icon" aria-label="Close assistant" title="Close assistant" onClick={() => setAssistantOpen(false)}><RiCloseLine /></Button>
@@ -784,13 +836,13 @@ export default function ReaderPage() {
               <EmptyHeader>
                 <EmptyMedia variant="icon"><RiMessage2Line /></EmptyMedia>
                 <EmptyTitle>Start a conversation</EmptyTitle>
-                <EmptyDescription>Ask a question about the page you’re reading.</EmptyDescription>
+                <EmptyDescription>{advancedThink ? "Compare pages, connect ideas, or ask about the whole document." : "Ask a question about the page you’re reading."}</EmptyDescription>
               </EmptyHeader>
             </Empty> : <MessageScroller>
               <MessageScrollerViewport>
                 <MessageScrollerContent aria-busy={busy} className="p-(--card-spacing)">
                   {chatMessages.map((message) => <MessageScrollerItem key={message.id} messageId={message.id} scrollAnchor={message.role === "user"}>
-                    <Message align={message.role === "user" ? "end" : "start"}><MessageContent><Bubble variant={message.role === "user" ? "default" : "muted"}><BubbleContent>{message.role === "assistant" ? <MarkdownMessage text={message.text} /> : <p className="whitespace-pre-wrap" dir="auto">{message.text}</p>}{message.role === "assistant" && !message.voice && !voice.active && <SpeechPlayer text={message.speechText || message.text} />}</BubbleContent></Bubble></MessageContent></Message>
+                    <Message align={message.role === "user" ? "end" : "start"}><MessageContent><Bubble variant={message.role === "user" ? "default" : "muted"}><BubbleContent>{message.role === "assistant" ? <MarkdownMessage text={message.text} /> : <p className="whitespace-pre-wrap" dir="auto">{message.text}</p>}{message.sourcePages?.length ? <div className="mt-2 flex flex-wrap items-center gap-1" aria-label="Document pages consulted"><span className="mr-1 text-xs text-muted-foreground">Pages consulted:</span>{message.sourcePages.map((number) => <Button key={number} type="button" variant="outline" size="xs" onClick={() => goToPage(number)} aria-label={`Go to source page ${number}`}>{number}</Button>)}</div> : null}{message.role === "assistant" && !message.voice && !voice.active && <SpeechPlayer text={message.speechText || message.text} />}</BubbleContent></Bubble></MessageContent></Message>
                   </MessageScrollerItem>)}
                   {busy && <MessageScrollerItem messageId="thinking"><div role="status" className="flex items-center gap-2 text-xs text-muted-foreground"><Spinner />{busyLabel}</div></MessageScrollerItem>}
                   {chatError && <MessageScrollerItem messageId="error"><Alert variant="destructive"><AlertDescription>{chatError}</AlertDescription></Alert></MessageScrollerItem>}
@@ -803,8 +855,9 @@ export default function ReaderPage() {
 
             <form onSubmit={(event) => { event.preventDefault(); void askAi() }} className="w-full">
               <InputGroup>
-                <InputGroupTextarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="Ask about this page…" aria-label="Ask Prism AI" className="min-h-14 px-3" />
+                <InputGroupTextarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={advancedThink ? "Ask about the document…" : "Ask about this page…"} aria-label="Ask Prism AI" className="min-h-14 px-5" />
                 <InputGroupAddon align="block-end" className="pt-1">
+                  <InputGroupButton type="button" variant="ghost" size="sm" className={advancedThink ? "bg-blue-600 text-white hover:bg-blue-500 hover:text-white dark:hover:bg-blue-500" : undefined} aria-pressed={advancedThink} disabled={busy || voice.active} title="Search across this PDF and examine relevant page images" onClick={() => setAdvancedThink((value) => !value)}><RiSparklingLine className="size-3.5" />Advanced think</InputGroupButton>
                   <InputGroupButton type="submit" variant="default" size="icon-sm" disabled={busy || voice.active || !prompt.trim()} className="ml-auto" aria-label="Send question"><RiArrowUpLine /></InputGroupButton>
                 </InputGroupAddon>
               </InputGroup>

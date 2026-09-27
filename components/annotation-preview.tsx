@@ -18,9 +18,9 @@ import type { Worker } from "tesseract.js"
 export type AnnotationDraft = { text: string; topic: string; instructions: string; language: string; detailed: boolean }
 type Action = Exclude<ReaderAction, "ask">
 const descriptions: Record<Action, { title: string; about: string; instructions: string }> = {
-  adapt: { title: "Adapt this selection", about: "A version in your chosen AI language and response depth.", instructions: "Adapt the passage to my selected response depth while keeping its full meaning." },
-  explain: { title: "Adapt this selection", about: "A version in your chosen AI language and response depth.", instructions: "Adapt the passage to my selected response depth while keeping its full meaning." },
-  quiz: { title: "Create a quiz", about: "Questions and answer explanations grounded in this passage.", instructions: "Quiz me on the main ideas and details in this passage." },
+  adapt: { title: "Explain this selection", about: "Understand the ideas, terms, and reasoning in your chosen language and response depth.", instructions: "Explain the main ideas step by step, define unfamiliar terms, and use an example where helpful." },
+  explain: { title: "Explain this selection", about: "Understand the ideas, terms, and reasoning in your chosen language and response depth.", instructions: "Explain the main ideas step by step, define unfamiliar terms, and use an example where helpful." },
+  quiz: { title: "Create a quiz", about: "Questions and answer explanations grounded in your selected text or image.", instructions: "Quiz me on the main ideas and details in this selection, including relevant diagrams and formulas." },
   translate: { title: "Translate this selection", about: "A translation of the text below into your chosen language.", instructions: "Preserve the meaning and technical terms." },
   pronunciation: { title: "Practice pronunciation", about: "Pronunciation guides and spoken examples for this selection.", instructions: "Help me pronounce the important names and terms." },
   video: { title: "Create an animated lesson", about: "A narrated Manim lesson that develops these ideas with diagrams, worked examples, and a recap.", instructions: "Build intuition, explain each important detail, show a worked example, and finish with a recap." },
@@ -28,7 +28,7 @@ const descriptions: Record<Action, { title: string; about: string; instructions:
 
 export function AnnotationPreview({ action, image, initialText, defaultLanguage, defaultProficiency, onClose, onSubmit }: { action: Action; image?: string; initialText: string; defaultLanguage: string; defaultProficiency: ReadingProficiency; onClose: () => void; onSubmit: (draft: AnnotationDraft) => void }) {
   const description = descriptions[action]
-  const directImage = action === "video" && !!image
+  const directImage = (action === "video" || action === "quiz") && !!image
   const [text, setText] = useState(image ? "" : initialText)
   const [topic, setTopic] = useState("")
   const [instructions, setInstructions] = useState(description.instructions)
@@ -37,13 +37,13 @@ export function AnnotationPreview({ action, image, initialText, defaultLanguage,
   const [detailed, setDetailed] = useState(true)
   const [progress, setProgress] = useState(0)
   const [status, setStatus] = useState(image ? "Reading the selected area…" : "Ready to review")
-  const [reading, setReading] = useState(!!image && action !== "video")
+  const [reading, setReading] = useState(!!image && !directImage)
   const [error, setError] = useState("")
   const [attempt, setAttempt] = useState(0)
   const dirty = useRef(false)
   useEffect(() => {
     const sourceImage = image
-    if (!sourceImage || action === "video") return
+    if (!sourceImage || directImage) return
     let active = true
     let worker: Worker | undefined
     async function extract(source: string) {
@@ -65,13 +65,13 @@ export function AnnotationPreview({ action, image, initialText, defaultLanguage,
     }
     void extract(sourceImage)
     return () => { active = false; void worker?.terminate().catch(() => undefined) }
-  }, [image, ocrLanguage, attempt, action])
+  }, [image, ocrLanguage, attempt, directImage])
 
   function retry() { dirty.current = false; setAttempt((value) => value + 1) }
   return <Dialog open onOpenChange={(open) => { if (!open) onClose() }}><DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-4xl">
     <DialogHeader><DialogTitle>{description.title}</DialogTitle><DialogDescription>{description.about} {directImage ? "The model will read your selected image directly." : "Review and edit it before submitting."}</DialogDescription><p className="text-xs text-muted-foreground">AI output: {language} · Depth: {proficiencyLevels.find((level) => level.value === defaultProficiency)?.label}</p></DialogHeader>
     <form onSubmit={(event) => { event.preventDefault(); if ((directImage || text.trim()) && !reading) onSubmit({ text: text.trim(), topic: topic.trim(), instructions: instructions.trim(), language, detailed }) }} className="grid gap-6">
-      <div className={image ? "grid gap-4 md:grid-cols-2" : "grid gap-4"}>
+      <div className={image && !directImage ? "grid gap-4 md:grid-cols-2" : "grid gap-4"}>
         {image && <div className="flex min-h-40 items-center justify-center overflow-hidden rounded-2xl border p-4"><img src={image} alt="The selected area of your PDF" className="max-h-64 max-w-full object-contain" /></div>}
         {!directImage && <Field className="min-w-0">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -109,7 +109,7 @@ export function AnnotationPreview({ action, image, initialText, defaultLanguage,
         </Field>}
       </div>
       <Separator />
-      <DialogFooter className="items-center sm:justify-between"><p className="text-sm text-muted-foreground">{action === "video" ? "This selection is the focus; relevant passages from this PDF add context." : "Only this reviewed selection will be used as the source."}</p><Button type="submit" disabled={reading || (!directImage && !text.trim())}>Submit &amp; generate<RiArrowRightLine className="size-4" /></Button></DialogFooter>
+      <DialogFooter className="items-center sm:justify-between"><p className="text-sm text-muted-foreground">{action === "video" ? "This selection is the focus; relevant passages from this PDF add context." : directImage ? "Your selected image will be used as the quiz source." : "Only this reviewed selection will be used as the source."}</p><Button type="submit" disabled={reading || (!directImage && !text.trim())}>Submit &amp; generate<RiArrowRightLine className="size-4" /></Button></DialogFooter>
     </form>
   </DialogContent></Dialog>
 }

@@ -4,6 +4,7 @@ import { readPdfPageText } from "./pdf-text"
 export type DocumentPassage = { page: number; text: string }
 type IndexedPassage = DocumentPassage & { terms: Map<string, number> }
 
+const pageTextCache = new WeakMap<PDFDocumentProxy, Promise<DocumentPassage[]>>()
 const indexCache = new WeakMap<PDFDocumentProxy, Promise<IndexedPassage[]>>()
 const stopWords = new Set("about after again against also among because been before between could does each from have into more most other over same some such than that their them then there these this those through under very were what when where which while with would your".split(" "))
 
@@ -33,21 +34,32 @@ function splitPassages(text: string): string[] {
   return passages
 }
 
-async function indexDocument(pdf: PDFDocumentProxy): Promise<IndexedPassage[]> {
-  const indexed: IndexedPassage[] = []
-  for (let page = 1; page <= pdf.numPages; page++) {
-    try {
-      const text = await readPdfPageText(await pdf.getPage(page), 100_000)
-      for (const passage of splitPassages(text)) indexed.push({ page, text: passage, terms: terms(passage) })
-    } catch { /* Image-only and unreadable pages cannot supply text evidence. */ }
+export function documentPageTexts(pdf: PDFDocumentProxy, status?: (text: string) => void): Promise<DocumentPassage[]> {
+  let cached = pageTextCache.get(pdf)
+  if (!cached) {
+    cached = (async () => {
+      const pages: DocumentPassage[] = []
+      for (let page = 1; page <= pdf.numPages; page++) {
+        if (page === 1 || page % 25 === 0) status?.(`Indexing document page ${page} of ${pdf.numPages}…`)
+        const text = await readPdfPageText(await pdf.getPage(page), 100_000).catch(() => "")
+        pages.push({ page, text })
+      }
+      return pages
+    })()
+    pageTextCache.set(pdf, cached)
+    void cached.catch(() => pageTextCache.delete(pdf))
   }
-  return indexed
+  return cached
 }
 
-export async function retrieveDocumentPassages(pdf: PDFDocumentProxy, selection: string, topic = "", selectedPage?: number): Promise<DocumentPassage[]> {
+async function indexDocument(pdf: PDFDocumentProxy): Promise<IndexedPassage[]> {
+  return (await documentPageTexts(pdf)).flatMap(({ page, text }) => splitPassages(text).map((passage) => ({ page, text: passage, terms: terms(passage) })))
+}
+
+export async function retrieveDocumentPassages(pdf: PDFDocumentProxy, selection: string, topic = "", selectedPage?: number, supplemental: DocumentPassage[] = []): Promise<DocumentPassage[]> {
   let index = indexCache.get(pdf)
   if (!index) { index = indexDocument(pdf); indexCache.set(pdf, index) }
-  const passages = await index
+  const passages = [...await index, ...supplemental.map((passage) => ({ ...passage, terms: terms(passage.text) }))]
   if (!passages.length) return []
 
   const query = terms(`${topic} ${selection.slice(0, 4000)}`)
