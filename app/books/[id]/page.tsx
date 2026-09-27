@@ -6,6 +6,7 @@ import { useEffect, useState } from "react"
 import { RiArrowLeftLine, RiArrowRightLine, RiBookOpenLine, RiDeleteBin6Line } from "@remixicon/react"
 import { AnnotationTypeIcon } from "@/components/annotation-type-icon"
 import { BookCover } from "@/components/book-cover"
+import { BookSummary } from "@/components/book-summary"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -116,12 +117,13 @@ export default function BookPage() {
         </section>
 
         <section className="border-t border-border/70 py-14 sm:py-20" aria-labelledby="about-title">
-          <div className="grid gap-6 md:grid-cols-[280px_minmax(0,1fr)] md:gap-16">
+          <div className="grid gap-8 md:grid-cols-[280px_minmax(0,1fr)_minmax(0,1fr)] md:gap-12">
             <div><p className="mb-3 text-xs font-medium uppercase tracking-[.2em] text-muted-foreground">01 / Overview</p><h2 id="about-title" className="text-3xl font-medium tracking-[-.04em]">About this book</h2></div>
             <div className="max-w-2xl text-base leading-8 text-muted-foreground">
               <p><span className="text-foreground">{book.title}</span> is a PDF in your personal library. Open the original document to start reading.</p>
               <p className="mt-5 text-sm">Original file: <span className="break-all text-foreground">{book.name}</span></p>
             </div>
+            <BookSummary book={book} />
           </div>
         </section>
 
